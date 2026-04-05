@@ -35,18 +35,12 @@ Details on sources and tools: **[ATTRIBUTIONS.md](ATTRIBUTIONS.md)**.
 source ~/path/to/RTFM/fzf-man-opts.zsh
 ```
 
-Shorter path (loads the same implementation):
-
-```zsh
-source ~/path/to/RTFM/rtfm
-```
-
 ### Oh My Zsh
 
 Clone into custom plugins:
 
 ```bash
-git clone https://github.com/YOU/RTFM.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/rtfm
+git clone https://github.com/YOU/RTFM.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/fzf-man-opts.zsh
 ```
 
 Add `rtfm` to `plugins=(… rtfm …)` in `~/.zshrc`.
