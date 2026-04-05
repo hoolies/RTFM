@@ -8,15 +8,7 @@ You wanted **seamless manual/help access**; you also wanted **path-aware Tab** (
 
 ## What it does (short)
 
-| Context | Tab opens |
-|--------|-----------|
-| After `source` or `.` (next arg) | Merged **history** of sourced files + **files** under the inferred directory (`h`/`p` rows, one `fzf` list) |
-| After `cd` or `pushd` | Same idea with **directories only**; if cwd is `.`, also lists **top-level `/`** dirs |
-| Path-shaped token or “path verbs” (`cp`, `mv`, …) | **Files + dirs** under the relevant directory (`fd` or `find`) |
-| First command word (or after lone `sudo`) | **Executables** on `$PATH` + shell builtins, **sorted by first-token history frequency** |
-| Everything else (e.g. `git |`) | **RTFM**: `man` / `man -k` **`cmd-*`** pages / **`cmd sub --help`** parsed into `token<TAB>description` rows for `fzf` |
-
-**Alt-m** runs the same unified widget (handy when you want the menu without relying on Tab context).
+It provides autocomplete suggestions from a fuzzy list that reads the manual, help file and history.
 
 Special cases: **`ip`**, **`docker`**, **`sv`** (runit) have tailored parsers so lists match those CLIs. **`sv`** can list **services** under `$SVDIR` once a verb is on the line.
 
