@@ -1,4 +1,4 @@
-# RTFM — Read The Fuzzy Manual
+# RTFM (Read The Fuzzy Manual)
 
 A **zsh** plugin that binds **one intelligent Tab (`^I`)** and **Alt-m (`^[m`)** to a single ZLE widget. It gives you **fuzzy access to manual pages and `--help` output** without installing a second Tab-completion plugin that fights for the same key.
 
