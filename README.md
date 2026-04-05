@@ -40,7 +40,7 @@ source ~/path/to/RTFM/fzf-man-opts.zsh
 Clone into custom plugins:
 
 ```bash
-git clone https://github.com/YOU/RTFM.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/fzf-man-opts.zsh
+git clone https://github.com/hoolies/RTFM.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/fzf-man-opts.zsh
 ```
 
 Add `rtfm` to `plugins=(… rtfm …)` in `~/.zshrc`.
