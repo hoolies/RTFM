@@ -1493,6 +1493,28 @@ __fzf_pick_mixed() {
   return 0
 }
 
+__fzf_rtfm_first_option_form() {
+  # "-A, --all" or "-A --all" → "-A". Subcommands and single options are unchanged.
+  setopt localoptions noshwordsplit
+  local tok="$1"
+  [[ "$tok" == -* ]] || { print -r -- "$tok"; return 0 }
+  local first rest
+  if [[ "$tok" == *,* ]]; then
+    first="${tok%%,*}"
+  else
+    first="${tok%% *}"
+    rest="${tok#"$first"}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    if [[ "$tok" != *' '* || "$rest" != -* ]]; then
+      print -r -- "$tok"
+      return 0
+    fi
+  fi
+  first="${first#"${first%%[![:space:]]*}"}"
+  first="${first%"${first##*[![:space:]]}"}"
+  print -r -- "$first"
+}
+
 __fzf_apply_mixed_pick() {
   local row="$1" kind tok
   [[ -z "$row" ]] && return 1
@@ -1503,6 +1525,7 @@ __fzf_apply_mixed_pick() {
   if [[ "$kind" == f && -d "$tok" ]]; then
     __fzf_apply_dir_pick "$tok"
   else
+    [[ "$kind" == m ]] && tok="$(__fzf_rtfm_first_option_form "$tok")"
     __fzf_apply_pick "$tok"
   fi
 }
