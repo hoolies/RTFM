@@ -1,0 +1,4 @@
+#!/usr/bin/env zsh
+# RTFM — Read The Fuzzy Manual: thin entrypoint. Implementation lives in fzf-man-opts.zsh.
+0=${(%):-%x}
+builtin source "${0:A:h}/fzf-man-opts.zsh"

@@ -27,12 +27,18 @@
 #
 # Check what you are running:  echo $SHELL   ps -p $$ -o comm=
 # Use a real path (container / remote workspace paths may differ from ~/... on the host).
-# Zsh widget on Tab and Alt-m (unified):
-# - Path-like or “path verbs” (cp, mkdir, … — not cd/pushd): fzf files+dirs under the relevant directory (fd or find)
-# - After source / . (next argument): single fzf listing history (source / . / …) + files under the relevant dir
-# - After cd / pushd (next argument): history (cd / pushd / …) + directories only (recursive under relevant dir)
-# - Command position (first word, or after sole “sudo”): fzf over $PATH executables sorted by history frequency
-# - Otherwise: man/help option picker (RTFM) for the current command, else normal Tab completion
+# Tab:
+# - First word with no trailing space (or an empty line): $PATH executables + builtins.
+#   Exact prefix match of one name inserts "name ". Several matches: fzf (history then alphabetical).
+# - After a space following the real command: man/--help tokens, then cwd files/dirs when usage
+#   looks like it takes a path. Token starting with "-" is options only.
+# - Typed directory prefix (src/, ../): list that directory’s immediate children; pick a dir → "name/"
+#   with no space so the next Tab walks one level deeper.
+# - Wrappers skipped: sudo doas command builtin env time nice nohup
+# - Special parsers: ip, docker, sv (then files by the same usage rule)
+# - No Alt-m bind. Esc leaves the line unchanged. One row per Tab.
+# - Uses man pages (and sub-man pages like git-status) when available, else --help / -h
+# - UI: left token, right description (man text, or size+permissions for files)
 # - Uses man pages (and sub-man pages like `git-commit`) when available
 # - Otherwise falls back to `binary --help` / `binary -h`
 # - Special cases:
@@ -110,7 +116,7 @@ __fzf_rtfm_fzf_exec() {
 typeset -ga __fzf_rtfm_merged_path_scheme
 if [[ ${FZF_RTFM_NO_PATH_SCHEME-0} != 0 ]]; then
   __fzf_rtfm_merged_path_scheme=()
-elif command fzf --help 2>/dev/null | command rg -q -- '--scheme'; then
+elif command fzf --help 2>/dev/null | command rg -q -- '--scheme' 2>/dev/null; then
   __fzf_rtfm_merged_path_scheme=(--scheme path)
 else
   __fzf_rtfm_merged_path_scheme=()
@@ -177,10 +183,10 @@ __fzf_get_help_text() {
   local binary_name="$1"
   local txt
 
-  # Prefer `--help`, fall back to `-h`
-  txt=$("$binary_name" --help 2>/dev/null) || true
+  # Prefer `--help`, fall back to `-h`. PAGER=cat so help never blocks on a pager.
+  txt=$(PAGER=cat MANPAGER=cat "$binary_name" --help 2>/dev/null) || true
   if [[ -z "$txt" ]]; then
-    txt=$("$binary_name" -h 2>/dev/null) || true
+    txt=$(PAGER=cat MANPAGER=cat "$binary_name" -h 2>/dev/null) || true
   fi
   # runit sv(8) often prints a one-line usage only on stderr when run with no args
   if [[ -z "$txt" && "$binary_name" == sv ]]; then
@@ -193,7 +199,7 @@ __fzf_get_help_text() {
   fi
 
   # "usage:" or "usage " (some tools omit the colon)
-  if ! print -r -- "$txt" | rg -iq '(^|[[:space:]])usage[[:space:]:]'; then
+  if ! print -r -- "$txt" | command rg -iq '(^|[[:space:]])usage[[:space:]:]'; then
     return 2
   fi
 
@@ -679,7 +685,7 @@ EOF
 __fzf_sv_usage_line() {
   local manfull line
   manfull="$(man sv 2>/dev/null | col -b)"
-  line="$(print -r -- "$manfull" | rg -m1 -i 'usage:' || true)"
+  line="$(print -r -- "$manfull" | command rg -m1 -i 'usage:' || true)"
   if [[ -z "$line" ]]; then
     if command -v timeout >/dev/null 2>&1; then
       line="$(timeout 1 sv 2>&1 | awk 'NR==1{print; exit}')" || true
@@ -720,10 +726,10 @@ __fzf_sv_entries() {
 
   usage_line="$(__fzf_sv_usage_line)"
   opts_syn=""
-  if print -r -- "$usage_line" | rg -iq '\[-v\]'; then
+  if print -r -- "$usage_line" | command rg -iq '\[-v\]'; then
     opts_syn+=$'\n-v\tsv option (before command): verbose'
   fi
-  if print -r -- "$usage_line" | rg -iq '\[-w'; then
+  if print -r -- "$usage_line" | command rg -iq '\[-w'; then
     opts_syn+=$'\n-w\tsv option (before command): wait timeout; type as -w then a number, e.g. -w 5'
   fi
 
@@ -809,31 +815,30 @@ __fzf_sv_service_entries() {
 }
 
 # ---------- Decide how to interpret the current line ----------
+__fzf_rtfm_is_wrapper() {
+  case "$1" in
+    sudo|doas|command|builtin|env|time|nice|nohup) return 0 ;;
+  esac
+  return 1
+}
+
 __fzf_get_cmd_and_sub() {
-  # Parses ZLE buffers:
-  # - cmd is first real command word (after optional sudo, then builtin/command prefixes)
-  # - sub is first non-option word after cmd
+  # cmd = first real command after wrappers; sub = first non-option word after cmd
   setopt localoptions noshwordsplit
 
   local words=(${(z)LBUFFER})
   (( ${#words} == 0 )) && return 1
 
-  local cmd="${words[1]}"
-  local start_idx=2
-
-  if [[ "$cmd" == sudo && ${#words} -ge 2 ]]; then
-    cmd="${words[2]}"
-    start_idx=3
-  fi
-
-  while [[ "$cmd" == builtin || "$cmd" == command ]] && (( start_idx <= ${#words} )); do
-    cmd="${words[start_idx]}"
+  local start_idx=1
+  while (( start_idx <= ${#words} )) && __fzf_rtfm_is_wrapper "${words[start_idx]}"; do
     (( start_idx++ ))
   done
+  (( start_idx <= ${#words} )) || return 1
 
+  local cmd="${words[start_idx]}"
   local sub=""
   local i
-  for (( i = start_idx; i <= ${#words}; i++ )); do
+  for (( i = start_idx + 1; i <= ${#words}; i++ )); do
     [[ "${words[i]}" == -* ]] && continue
     sub="${words[i]}"
     break
@@ -924,16 +929,16 @@ __fzf_build_entries() {
 
     # no sub-man: use help from "$cmd $sub --help" (best effort)
     local help_txt
-    help_txt=$("$cmd" "$sub" --help 2>/dev/null) || true
+    help_txt=$(PAGER=cat MANPAGER=cat "$cmd" "$sub" --help 2>/dev/null) || true
     if [[ -z "$help_txt" ]]; then
-      help_txt=$("$cmd" "$sub" -h 2>/dev/null) || true
+      help_txt=$(PAGER=cat MANPAGER=cat "$cmd" "$sub" -h 2>/dev/null) || true
     fi
 
     if [[ -z "$help_txt" ]]; then
       print -u2 "Binary $cmd has no manual or help."
       return 2
     fi
-    if ! print -r -- "$help_txt" | rg -iq '(^|[[:space:]])usage[[:space:]:]'; then
+    if ! print -r -- "$help_txt" | command rg -iq '(^|[[:space:]])usage[[:space:]:]'; then
       print -u2 "Binary $cmd has no manual or help."
       return 2
     fi
@@ -1103,10 +1108,14 @@ fzf_rtfm_diagnose() {
 __fzf_pick() {
   # $1: entries (token<TAB>description)
   # $2: prompt label
+  # $3: optional initial fzf query (current token)
   local entries="$1"
   local prompt="$2"
+  local query="${3-}"
 
   local selection fzf_ec=0
+  local -a qopts=()
+  [[ -n "$query" ]] && qopts=(--query="$query")
   # zsh runs EXIT traps when the enclosing function returns (see zshbuiltins trap).
   local -i __fzf_pick_cleanup_done=0
   __fzf_pick__fin() {
@@ -1130,7 +1139,8 @@ __fzf_pick() {
       --nth=1 \
       --preview 'printf "%s\n" {2}' \
       --preview-window="$__fzf_rtfm_fzf_preview_window" \
-      "${__fzf_rtfm_fzf_binds_preview[@]}"
+      "${__fzf_rtfm_fzf_binds_preview[@]}" \
+      "${qopts[@]}"
     fzf_ec=${pipestatus[-1]}
     __fzf_rtfm_stty_restore
     exit "$fzf_ec"
@@ -1139,17 +1149,15 @@ __fzf_pick() {
   trap - EXIT INT QUIT
   __fzf_pick__fin
 
-  (( fzf_ec != 0 )) && return 0
+  (( fzf_ec != 0 )) && return 2
 
   # Only return the left token (everything before the TAB).
   printf '%s\n' "${selection%%$'\t'*}"
 }
 
-# ---------- ZLE: Tab (path / PATH+history / RTFM) + Alt-m ----------
-# Binds '^I' (Tab). Falls back to zle .expand-or-complete when no branch matches.
+# ---------- ZLE: Tab (PATH command, then man + files) ----------
 
 __fzf_zle_token_state() {
-  # Sets globals: prefix_rest, lastw, nwords (trailing space => new empty token)
   typeset -g prefix_rest lastw nwords
   setopt localoptions noshwordsplit extended_glob
   local lb="$LBUFFER"
@@ -1187,7 +1195,18 @@ __fzf_apply_pick() {
   zle redisplay
 }
 
-# Normalise picker exit codes: 2 → Esc/abort (redisplay only); else apply $3 "$2". $1=code, $2=picked.
+__fzf_apply_dir_pick() {
+  local picked="$1"
+  [[ -z "$picked" ]] && return 1
+  picked="${picked%/}/"
+  if [[ -z "$prefix_rest" ]]; then
+    LBUFFER="${picked}"
+  else
+    LBUFFER="${prefix_rest} ${picked}"
+  fi
+  zle redisplay
+}
+
 __fzf_tab_finish_fzf_pick() {
   local rc="$1" picked="$2" apply="$3"
   (( rc == 2 )) && { zle redisplay; return 0; }
@@ -1196,295 +1215,23 @@ __fzf_tab_finish_fzf_pick() {
   "$apply" "$picked"
 }
 
-# Sets dir and base for path-style fzf listings (ZLE lastw; optional path fragment in $1).
-__fzf_tab_path_token_dir_base() {
-  setopt localoptions noshwordsplit extended_glob
-  local exp="${1-$lastw}"
-  [[ -z "$exp" ]] && exp='.'
-  [[ "$exp" == '~'* ]] && exp="${~exp}"
-  if [[ -z "$lastw" ]]; then
-    dir='.' base=''
-  elif [[ -d "$exp" ]]; then
-    dir="$exp" base=''
-  elif [[ -n "$exp" ]]; then
-    dir="${exp:h}" base="${exp:t}"
-  else
-    dir='.' base=''
-  fi
-  [[ -d "$dir" ]] || dir='.'
-}
-
-__fzf_tab_apply_merged_hist_path_pick() {
-  local picked="$1" kind rest
-  [[ -z "$picked" ]] && return 1
-  kind="${picked%%$'\t'*}"
-  rest="${picked#*$'\t'}"
-  case "$kind" in
-    h) __fzf_apply_source_hist_pick "$rest" ;;
-    p) __fzf_apply_pick "$rest" ;;
-    *) return 1 ;;
-  esac
-}
-
-__fzf_last_word_is_pathlike() {
-  local w="$1"
-  [[ -n "$w" ]] || return 1
-  [[ "$w" == /* || "$w" == ./* || "$w" == ../* || "$w" == '~'* || "$w" == */* ]]
-}
-
-__fzf_expect_path_arg() {
-  setopt localoptions noshwordsplit extended_glob
-  [[ -z "$prefix_rest" ]] && return 1
-  local -a w
-  w=(${(z)prefix_rest})
-  local prev="${w[-1]}"
-  [[ -n "$prev" ]] || return 1
-  case "$prev" in
-    cd|pushd)
-      return 1 ;;
-    mkdir|rmdir|chmod|chown|chgrp|cp|mv|ln|rm|ls|exa|lla|ll|la|l|tree|cat|tac|less|more|head|tail|xxd|od|file|stat|readlink|realpath|diff|diff3|patch|cmp|sum|cksum|sha*sum|md5sum|basename|dirname|tar|gzip|gunzip|zcat|bzip2|bunzip2|xz|unxz|install)
-      return 0 ;;
-  esac
-  return 1
-}
-
-__fzf_tab_is_command_position() {
-  if [[ -z "$prefix_rest" ]]; then
-    (( nwords == 1 )) && return 0
-    return 1
-  fi
-  local -a pw
-  pw=(${(z)prefix_rest})
-  (( ${#pw[@]} == 1 )) && [[ "${pw[1]}" == sudo ]] && return 0
-  return 1
-}
-
-__fzf_tab_first_cmd_word_after_modifiers() {
-  setopt localoptions noshwordsplit extended_glob
-  [[ -z "$prefix_rest" ]] && return 1
-  local -a w
-  w=(${(z)prefix_rest})
+__fzf_tab_completing_command_name() {
+  setopt localoptions noshwordsplit
+  local lb="$LBUFFER"
+  local -a words
+  local trailing=0
+  [[ "$lb" == *[[:space:]] ]] && trailing=1
+  words=(${(z)lb})
   local i=1
-  if [[ ${#w[@]} -ge 2 && "${w[1]}" == sudo ]]; then i=2; fi
-  while (( i <= ${#w[@]} )); do
-    case "${w[i]}" in
-      builtin|command) (( i++ )) ;;
-      *) break ;;
-    esac
+  while (( i <= ${#words} )) && __fzf_rtfm_is_wrapper "${words[i]}"; do
+    (( i++ ))
   done
-  (( i <= ${#w[@]} )) || return 1
-  REPLY="${w[i]}"
-  return 0
+  local nleft=$(( ${#words} - i + 1 ))
+  (( nleft <= 0 )) && return 0
+  (( nleft == 1 )) && (( !trailing )) && return 0
+  return 1
 }
 
-__fzf_tab_is_source_or_dot_arg() {
-  __fzf_tab_first_cmd_word_after_modifiers || return 1
-  [[ "$REPLY" == source || "$REPLY" == . ]]
-}
-
-__fzf_tab_is_cd_or_pushd_arg() {
-  __fzf_tab_first_cmd_word_after_modifiers || return 1
-  [[ "$REPLY" == cd || "$REPLY" == pushd ]]
-}
-
-# $1 = source_dot | cd_pushd
-__fzf_hist_shell_verb_lines() {
-  local mode="$1" depth="${FZF_RTFM_HIST_DEPTH:-4000}"
-  [[ "$depth" =~ ^[0-9]+$ ]] || depth=4000
-  fc -ln 1 -1 2>/dev/null | command tail -n "$depth" | command tac | command awk -v mode="$mode" '
-    {
-      w1 = $1
-      sub(/^[ \t\v\f\r]+/, "", w1)
-      w2 = $2
-      sub(/^[ \t\v\f\r]+/, "", w2)
-      if (mode == "source_dot") {
-        if (w1 == "source" || w1 == ".") { print $0; next }
-        if ((w1 == "sudo" || w1 == "builtin") && (w2 == "source" || w2 == ".")) { print $0; next }
-      } else if (mode == "cd_pushd") {
-        if (w1 == "cd" || w1 == "pushd") { print $0; next }
-        if ((w1 == "sudo" || w1 == "builtin") && (w2 == "cd" || w2 == "pushd")) { print $0; next }
-      }
-    }' | command awk '!seen[$0]++'
-}
-
-__fzf_hist_source_dot_lines() {
-  __fzf_hist_shell_verb_lines source_dot
-}
-
-__fzf_hist_cd_pushd_lines() {
-  __fzf_hist_shell_verb_lines cd_pushd
-}
-
-__fzf_apply_source_hist_pick() {
-  setopt localoptions noshwordsplit
-  local picked="$1"
-  [[ -z "$picked" ]] && return 1
-  local -a w
-  w=(${(z)prefix_rest})
-  local preamble=""
-  if (( ${#w[@]} >= 2 )); then
-    preamble="${w[1]}"
-    local i
-    for (( i = 2; i < ${#w[@]}; i++ )); do
-      preamble+=" ${w[i]}"
-    done
-  fi
-  if [[ -n "$preamble" ]]; then
-    LBUFFER="${preamble} ${picked} "
-  else
-    LBUFFER="${picked} "
-  fi
-  zle redisplay
-}
-
-# Tab-separated rows: h<TAB>history-line | p<TAB>path (paths from fd/find under relevant dir).
-__fzf_tab_build_source_arg_candidate_file() {
-  setopt localoptions noshwordsplit
-  local out="$1" dir="$2"
-  : >|"$out"
-  __fzf_hist_source_dot_lines | while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    line="${line//$'\t'/ }"
-    print -r $'h\t'"$line"
-  done >>"$out"
-  if command -v fd >/dev/null 2>&1; then
-    fd -H -t d -t f . "$dir" 2>/dev/null | while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      print -r $'p\t'"$line"
-    done >>"$out"
-  else
-    find "$dir" -xdev \( -type d -o -type f \) 2>/dev/null | command head -n 50000 | while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      print -r $'p\t'"$line"
-    done >>"$out"
-  fi
-}
-
-__fzf_tab_pick_hist_path_merged() {
-  setopt localoptions noshwordsplit
-  local listfile="$1" base_raw="$2" prompt="$3"
-  local q pick fzf_ec=0 ps
-  q="$(__fzf_rtfm_normalize_query "$base_raw")"
-  ps=$(mktemp "${TMPDIR:-/tmp}/fzf-hp-prev.XXXXXX")
-  {
-    print -r '#!/bin/sh'
-    print -r 'rest=$(printf %s "$1" | cut -f2-)'
-    print -r 'kind=$(printf %s "$1" | cut -f1)'
-    print -r 'if [ "$kind" = h ]; then printf "%s\n" "$rest"'
-    print -r 'elif [ "$kind" = p ] && [ -e "$rest" ]; then'
-    print -r '  if [ -d "$rest" ]; then ls -ld "$rest"'
-    print -r '  else printf "file(1): %s\n" "$(file -b "$rest" 2>/dev/null)"'
-    print -r '       command head -n 40 "$rest" 2>/dev/null'
-    print -r '  fi'
-    print -r 'fi'
-  } >"$ps"
-  command chmod +x "$ps"
-  local -i __fzf_hpmerged_done=0
-  __fzf_hpmerged_fin() {
-    ((__fzf_hpmerged_done)) && return 0
-    __fzf_hpmerged_done=1
-    command rm -f "$ps"
-    __fzf_rtfm_zle_parent_tty_restore
-    __fzf_tty_refreeze
-  }
-  trap '__fzf_hpmerged_fin' EXIT INT QUIT
-
-  __fzf_tty_unfreeze
-  __fzf_rtfm_zle_parent_tty_prepare
-  pick=$(
-    __fzf_rtfm_stty_for_fzf
-    command cat "$listfile" | __fzf_rtfm_fzf_exec \
-      "${__fzf_rtfm_fzf_window_common[@]}" \
-      --prompt="$prompt" \
-      --delimiter=$'\t' \
-      --with-nth=2 \
-      --nth=1,2 \
-      "${__fzf_rtfm_merged_path_scheme[@]}" \
-      --tiebreak=begin,length \
-      --preview-window="$__fzf_rtfm_fzf_preview_window" \
-      --preview="$ps {}" \
-      "${__fzf_rtfm_fzf_binds_preview[@]}" \
-      --query="$q"
-    fzf_ec=${pipestatus[-1]}
-    __fzf_rtfm_stty_restore
-    exit "$fzf_ec"
-  ) || fzf_ec=$?
-
-  trap - EXIT INT QUIT
-  __fzf_hpmerged_fin
-  (( fzf_ec != 0 )) && return 2
-  [[ -z "$pick" ]] && return 2
-  print -r -- "$pick"
-  return 0
-}
-
-__fzf_tab_pick_source_arg() {
-  __fzf_tab_pick_hist_path_merged "$1" "$2" 'src+path> '
-}
-
-__fzf_tab_try_source_arg() {
-  setopt localoptions noshwordsplit extended_glob
-  __fzf_tab_is_source_or_dot_arg || return 1
-  [[ "$lastw" == -* ]] && return 1
-  local dir base listf picked rc
-  __fzf_tab_path_token_dir_base
-  listf=$(mktemp "${TMPDIR:-/tmp}/fzf-tab-srcpath.XXXXXX")
-  __fzf_tab_build_source_arg_candidate_file "$listf" "$dir"
-  [[ ! -s "$listf" ]] && { command rm -f "$listf"; return 1; }
-  picked="$(__fzf_tab_pick_source_arg "$listf" "$base")"
-  rc=$?
-  command rm -f "$listf"
-  __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_tab_apply_merged_hist_path_pick || return
-}
-
-# Tab-separated: h<TAB>history | p<TAB>dir only (recursive under dir).
-# When dir is ".", also add filesystem root's immediate subdirs (/) so /etc, /bin, … appear without only ./… paths.
-__fzf_tab_build_cd_arg_candidate_file() {
-  setopt localoptions noshwordsplit
-  local out="$1" dir="$2" deduped
-  : >|"$out"
-  __fzf_hist_cd_pushd_lines | while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    line="${line//$'\t'/ }"
-    print -r $'h\t'"$line"
-  done >>"$out"
-  if [[ "$dir" == . ]]; then
-    command find / -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      print -r $'p\t'"$line"
-    done >>"$out"
-  fi
-  if command -v fd >/dev/null 2>&1; then
-    fd -H -t d . "$dir" 2>/dev/null | while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      print -r $'p\t'"$line"
-    done >>"$out"
-  else
-    find "$dir" -xdev -type d 2>/dev/null | command head -n 50000 | while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      print -r $'p\t'"$line"
-    done >>"$out"
-  fi
-  deduped="${out}.dedup.$$"
-  command awk '!seen[$0]++' "$out" >"$deduped" && command mv -f "$deduped" "$out" || command rm -f "$deduped"
-}
-
-__fzf_tab_try_cd_arg() {
-  setopt localoptions noshwordsplit extended_glob
-  __fzf_tab_is_cd_or_pushd_arg || return 1
-  [[ "$lastw" == -* ]] && return 1
-  local dir base listf picked rc
-  __fzf_tab_path_token_dir_base
-  listf=$(mktemp "${TMPDIR:-/tmp}/fzf-tab-cddir.XXXXXX")
-  __fzf_tab_build_cd_arg_candidate_file "$listf" "$dir"
-  [[ ! -s "$listf" ]] && { command rm -f "$listf"; return 1; }
-  picked="$(__fzf_tab_pick_hist_path_merged "$listf" "$base" 'cd+dir> ')"
-  rc=$?
-  command rm -f "$listf"
-  __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_tab_apply_merged_hist_path_pick || return
-}
-
-# Executable names from PATH using zsh's command table (reliable vs huge globs / odd filesystems).
 __fzf_path_executable_names() {
   setopt localoptions noshwordsplit
   builtin rehash 2>/dev/null
@@ -1497,7 +1244,6 @@ __fzf_path_executable_names() {
   done | command sort -u
 }
 
-# Names people type as the first token but that are usually not PATH binaries (no /path → omitted above).
 __fzf_rtfm_cmd_picker_shell_words() {
   setopt localoptions noshwordsplit
   print -rl \
@@ -1508,7 +1254,23 @@ __fzf_rtfm_cmd_picker_shell_words() {
     limit logout print printf return break continue true false
 }
 
-# History word counts: all logic in awk (no zsh [[ ]] / $cnt[$w] — avoids bad keys like ] or broken quotes).
+__fzf_tab_command_names() {
+  {
+    __fzf_path_executable_names
+    __fzf_rtfm_cmd_picker_shell_words
+  } | command sort -u
+}
+
+__fzf_tab_command_matches() {
+  local prefix="$1" n
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    if [[ -z "$prefix" || "$n" == "$prefix"* ]]; then
+      print -r -- "$n"
+    fi
+  done
+}
+
 __fzf_hist_first_word_counts() {
   local depth="${FZF_RTFM_HIST_DEPTH:-4000}"
   [[ "$depth" =~ ^[0-9]+$ ]] || depth=4000
@@ -1527,40 +1289,35 @@ __fzf_hist_first_word_counts() {
     }
     END {
       for (x in c) printf "%d\t%s\n", c[x], x
-    }' | command sort -t $'\t' -nr -k1,1
+    }'
 }
 
 __fzf_tab_pick_command() {
   setopt localoptions noshwordsplit
-  local histf="$1"
-  local q
-  q="$(__fzf_rtfm_normalize_query "$2")"
+  local q="$1"
+  q="$(__fzf_rtfm_normalize_query "$q")"
   typeset -A score
   local cnt w
   while IFS=$'\t' read -r cnt w; do
     [[ "$cnt" =~ ^[0-9]+$ ]] || continue
     [[ -z "$w" ]] && continue
-    # Keys must be safe for zsh associative arrays (no [, ], \n)
     [[ "$w" == *']'* || "$w" == *'['* ]] && continue
     case "$w" in
       (*[^a-zA-Z0-9_.+:@%-]*) continue ;;
     esac
     score[$w]="$cnt"
-  done < "$histf"
+  done < <(__fzf_hist_first_word_counts)
 
   local tmpall
-  tmpall=$(mktemp "${TMPDIR:-/tmp}/fzf-tab-path.XXXXXX")
-  {
-    __fzf_path_executable_names
-    __fzf_rtfm_cmd_picker_shell_words
-  } | command sort -u >"$tmpall"
+  tmpall=$(mktemp "${TMPDIR:-/tmp}/fzf-tab-cmds.XXXXXX")
+  __fzf_tab_command_names | __fzf_tab_command_matches "$q" >"$tmpall"
 
-  local pick
-  local fzf_ec=0
+  local pick fzf_ec=0
   local -i __fzf_pick_cmd_done=0
   __fzf_pick_cmd_fin() {
     ((__fzf_pick_cmd_done)) && return 0
     __fzf_pick_cmd_done=1
+    command rm -f "$tmpall"
     __fzf_rtfm_zle_parent_tty_restore
     __fzf_tty_refreeze
   }
@@ -1575,7 +1332,7 @@ __fzf_tab_pick_command() {
       [[ -z "$cmd" ]] && continue
       sc="${score[$cmd]:-0}"
       printf $'%s\t%05d\n' "$cmd" "$sc"
-    done <"$tmpall" | command sort -t $'\t' -k2,2nr | __fzf_rtfm_fzf_exec \
+    done <"$tmpall" | command sort -t $'\t' -k2,2nr -k1,1f | __fzf_rtfm_fzf_exec \
       --ansi \
       "${__fzf_rtfm_fzf_window_common[@]}" \
       --prompt='cmd> ' \
@@ -1592,148 +1349,235 @@ __fzf_tab_pick_command() {
 
   trap - EXIT INT QUIT
   __fzf_pick_cmd_fin
-  command rm -f "$histf" "$tmpall"
   (( fzf_ec != 0 )) && return 2
   [[ -z "$pick" ]] && return 2
-  local cmdfield
-  cmdfield="$(print -r -- "$pick" | command cut -f1)"
-  [[ -z "$cmdfield" ]] && cmdfield="${pick%%$'\t'*}"
-  print -r -- "$cmdfield"
+  print -r -- "${pick%%$'\t'*}"
   return 0
 }
 
 __fzf_tab_try_command() {
-  __fzf_tab_is_command_position || return 1
-  local histf qbase picked rc
-  histf=$(mktemp "${TMPDIR:-/tmp}/fzf-tab-hist.XXXXXX")
-  __fzf_hist_first_word_counts >"$histf"
-  qbase="$lastw"
-  picked="$(__fzf_tab_pick_command "$histf" "$qbase")"
+  __fzf_tab_completing_command_name || return 1
+  local q="$lastw"
+  local -a matches
+  matches=(${(f)"$(__fzf_tab_command_names | __fzf_tab_command_matches "$q")"})
+  if [[ -n "$q" ]] && (( ${#matches} == 1 )); then
+    __fzf_apply_pick "${matches[1]}"
+    return 0
+  fi
+  local picked rc
+  picked="$(__fzf_tab_pick_command "$q")"
   rc=$?
   __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_apply_pick || return
 }
 
-__fzf_tab_pick_path() {
+__fzf_tab_path_token_dir_base() {
   setopt localoptions noshwordsplit extended_glob
-  local dir base pick fzf_ec=0
-  __fzf_tab_path_token_dir_base "${1-}"
-  local -i __fzf_tab_path_done=0
-  __fzf_tab_path_fin() {
-    ((__fzf_tab_path_done)) && return 0
-    __fzf_tab_path_done=1
+  local exp="${1-$lastw}"
+  [[ -z "$exp" ]] && exp='.'
+  [[ "$exp" == '~'* ]] && exp="${~exp}"
+  if [[ -z "$lastw" ]]; then
+    dir='.' base=''
+  elif [[ "$lastw" == */ || -d "$exp" ]]; then
+    dir="$exp" base=''
+    [[ -d "$dir" ]] || dir='.'
+  elif [[ -n "$exp" ]]; then
+    dir="${exp:h}" base="${exp:t}"
+    [[ "$dir" == "." && "$exp" != */* && "$exp" != .*/* ]] && dir='.'
+  else
+    dir='.' base=''
+  fi
+  [[ -d "$dir" ]] || dir='.'
+}
+
+__fzf_rtfm_text_wants_files() {
+  print -r -- "$1" | command awk '
+    /<file>|<path>|<dir>|filename/ { hit = 1 }
+    /(^|[^A-Za-z0-9_])FILE([^A-Za-z0-9_]|$)/ { hit = 1 }
+    /(^|[^A-Za-z0-9_])PATH([^A-Za-z0-9_]|$)/ { hit = 1 }
+    /(^|[^A-Za-z0-9_])DIR([^A-Za-z0-9_]|$)/ { hit = 1 }
+    tolower($0) ~ /usage:/ { usage = 1 }
+    /SYNOPSIS/ { usage = 1 }
+    usage {
+      for (i = 1; i <= NF; i++) {
+        w = $i
+        gsub(/[][|()<>,.]/, "", w)
+        if (w == "" || w ~ /^-/) continue
+        if (w ~ /^(OPTION|OPTIONS|SYNOPSIS|usage|Usage)$/) continue
+        if (i == 1) { cmd0 = w; continue }
+        if (w != cmd0 && w ~ /^[A-Za-z]/) pos = 1
+      }
+    }
+    END { exit !(hit || pos) }
+  '
+}
+
+__fzf_rtfm_docs_text() {
+  local cmd="$1" sub="$2"
+  if [[ -n "$sub" ]] && __fzf_man_topic_exists "${cmd}-${sub}"; then
+    command man "${cmd}-${sub}" 2>/dev/null | command col -b
+    return 0
+  fi
+  if __fzf_man_topic_exists "$cmd"; then
+    command man "$cmd" 2>/dev/null | command col -b
+    return 0
+  fi
+  __fzf_get_help_text "$cmd" 2>/dev/null
+}
+
+__fzf_tab_immediate_file_rows() {
+  setopt localoptions noshwordsplit
+  local dir="$1" p name
+  [[ -d "$dir" ]] || return 0
+  command find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null \
+    | command sort | while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        name="${p#./}"
+        print -r -- "$name"$'\tf\t'
+      done
+}
+
+__fzf_pick_mixed() {
+  local entries="$1" prompt="$2" query="${3-}"
+  local selection fzf_ec=0 ps
+  local -a qopts=()
+  [[ -n "$query" ]] && qopts=(--query="$query")
+  ps=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-prev.XXXXXX")
+  {
+    print -r '#!/bin/sh'
+    print -r 'line=$1'
+    print -r 'kind=$(printf %s "$line" | cut -f2)'
+    print -r 'tok=$(printf %s "$line" | cut -f1)'
+    print -r 'desc=$(printf %s "$line" | cut -f3-)'
+    print -r 'if [ "$kind" = f ]; then ls -ld -- "$tok" 2>/dev/null'
+    print -r 'else printf "%s\n" "$desc"'
+    print -r 'fi'
+  } >"$ps"
+  command chmod +x "$ps"
+
+  local -i __fzf_mixed_done=0
+  __fzf_mixed_fin() {
+    ((__fzf_mixed_done)) && return 0
+    __fzf_mixed_done=1
+    command rm -f "$ps"
     __fzf_rtfm_zle_parent_tty_restore
     __fzf_tty_refreeze
   }
-  trap '__fzf_tab_path_fin' EXIT INT QUIT
+  trap '__fzf_mixed_fin' EXIT INT QUIT
 
   __fzf_tty_unfreeze
   __fzf_rtfm_zle_parent_tty_prepare
-  pick=$(
+  selection=$(
     __fzf_rtfm_stty_for_fzf
-    if command -v fd >/dev/null 2>&1; then
-      fd -H -t d -t f . "$dir" 2>/dev/null
-    else
-      find "$dir" -xdev \( -type d -o -type f \) 2>/dev/null | command head -n 50000
-    fi | __fzf_rtfm_fzf_exec \
+    printf '%s\n' "$entries" | __fzf_rtfm_fzf_exec \
+      --ansi \
       "${__fzf_rtfm_fzf_window_common[@]}" \
-      --prompt='path> ' \
-      --preview='test -e {} && { if test -d {}; then ls -ld {}; else printf "file(1): %s\n" "$(file -b {} 2>/dev/null)"; fi; } || true' \
+      --prompt="$prompt" \
+      --delimiter=$'\t' \
+      --with-nth=1 \
+      --nth=1 \
+      --tiebreak=begin,length \
+      --preview="$ps {}" \
       --preview-window="$__fzf_rtfm_fzf_preview_window" \
       "${__fzf_rtfm_fzf_binds_preview[@]}" \
-      --query="$base"
+      "${qopts[@]}"
     fzf_ec=${pipestatus[-1]}
     __fzf_rtfm_stty_restore
     exit "$fzf_ec"
   ) || fzf_ec=$?
 
   trap - EXIT INT QUIT
-  __fzf_tab_path_fin
+  __fzf_mixed_fin
   (( fzf_ec != 0 )) && return 2
-  [[ -z "$pick" ]] && return 2
-  print -r -- "$pick"
+  [[ -z "$selection" ]] && return 2
+  print -r -- "$selection"
   return 0
 }
 
-__fzf_tab_try_path() {
-  setopt localoptions noshwordsplit extended_glob
-  __fzf_tab_is_cd_or_pushd_arg && return 1
-  local want=0
-  if __fzf_last_word_is_pathlike "$lastw"; then
-    want=1
-  elif [[ -n "$lastw" ]] && __fzf_expect_path_arg && [[ "$lastw" != -* ]]; then
-    want=1
-  elif [[ -z "$lastw" ]] && __fzf_expect_path_arg; then
-    want=1
+__fzf_apply_mixed_pick() {
+  local row="$1" kind tok
+  [[ -z "$row" ]] && return 1
+  kind="${row#*$'\t'}"
+  kind="${kind%%$'\t'*}"
+  tok="${row%%$'\t'*}"
+  [[ -z "$tok" ]] && return 1
+  if [[ "$kind" == f && -d "$tok" ]]; then
+    __fzf_apply_dir_pick "$tok"
+  else
+    __fzf_apply_pick "$tok"
   fi
-  (( want )) || return 1
-
-  local exp="$lastw"
-  [[ -z "$exp" ]] && exp='.'
-  local picked rc
-  picked="$(__fzf_tab_pick_path "$exp")"
-  rc=$?
-  __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_apply_pick || return
 }
 
 __fzf_tab_try_rtfm() {
   setopt localoptions noshwordsplit
-  local parsed cmd sub entries picked
+  __fzf_tab_completing_command_name && return 1
+
+  local parsed cmd sub entries docs picked rc dir base q
   parsed="$(__fzf_get_cmd_and_sub)" || return 1
   cmd="${parsed%%$'\t'*}"
   sub="${parsed#*$'\t'}"
   [[ -z "$cmd" ]] && return 1
-  [[ "$cmd" == source || "$cmd" == . ]] && return 1
-  [[ "$cmd" == cd || "$cmd" == pushd ]] && return 1
-  [[ "$cmd" == builtin || "$cmd" == command ]] && return 1
-  __fzf_resolve_binary "$cmd" >/dev/null 2>&1 || return 1
+  __fzf_rtfm_is_wrapper "$cmd" && return 1
 
-  if ! entries="$(__fzf_build_entries "$cmd" "$sub" "${LBUFFER}${RBUFFER}")"; then
-    local rc=$?
-    (( rc == 2 )) && return 0
-    return 1
+  if [[ -n "$sub" && "$lastw" == "$sub" && "$lastw" != -* ]]; then
+    if ! __fzf_man_topic_exists "${cmd}-${sub}"; then
+      sub=""
+    fi
   fi
-  [[ -z "$entries" ]] && return 1
 
-  picked="$(__fzf_pick "$entries" "$cmd > ")" || true
-  [[ -z "$picked" ]] && { zle redisplay; return 0; }
+  entries=""
+  if entries="$(__fzf_build_entries "$cmd" "$sub" "${LBUFFER}${RBUFFER}" 2>/dev/null)"; then
+    :
+  else
+    entries=""
+  fi
 
-  __fzf_apply_pick "$picked"
-  return 0
+  local man_rows=""
+  if [[ -n "$entries" ]]; then
+    man_rows="$(print -r -- "$entries" | command awk -F '\t' 'NF { print $1 "\tm\t" $2 }')"
+  fi
+
+  local file_rows=""
+  if [[ "$lastw" != -* ]]; then
+    docs="$(__fzf_rtfm_docs_text "$cmd" "$sub" 2>/dev/null)" || docs=""
+    if [[ -n "$docs" ]] && __fzf_rtfm_text_wants_files "$docs"; then
+      dir='.' base=''
+      __fzf_tab_path_token_dir_base
+      file_rows="$(__fzf_tab_immediate_file_rows "$dir")"
+    fi
+  fi
+
+  local mixed
+  mixed="$(printf '%s\n%s\n' "$man_rows" "$file_rows" | command awk 'NF')"
+  [[ -n "$mixed" ]] || { zle redisplay; return 0; }
+
+  q="$lastw"
+  if [[ "$lastw" == */* || "$lastw" == */ ]]; then
+    q="$base"
+  fi
+
+  picked="$(__fzf_pick_mixed "$mixed" "$cmd > " "$q")"
+  rc=$?
+  __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_apply_mixed_pick || return
 }
 
 fzf_tab_unified_impl() {
   setopt localoptions noshwordsplit extended_glob
   __fzf_zle_token_state
-  if __fzf_tab_try_source_arg; then
-    return 0
-  fi
-  if __fzf_tab_try_cd_arg; then
-    return 0
-  fi
-  if __fzf_tab_try_path; then
-    return 0
-  fi
   if __fzf_tab_try_command; then
     return 0
   fi
   if __fzf_tab_try_rtfm; then
     return 0
   fi
-  zle .expand-or-complete
+  zle redisplay
 }
 
-fzf_man_opts_widget() {
-  fzf_tab_unified_impl "$@"
+fzf_rtfm_rebind_tab() {
+  bindkey '^I' fzf_tab_unified_widget
+  bindkey -r '^[m' 2>/dev/null || true
 }
 
 zle -N fzf_tab_unified_widget fzf_tab_unified_impl
-zle -N fzf_man_opts_widget fzf_tab_unified_impl
-
-# Call once at end of .zshrc if something (e.g. compinit) rebinds Tab after this file loads.
-fzf_rtfm_rebind_tab() {
-  bindkey '^I' fzf_tab_unified_widget
-}
 
 bindkey '^I' fzf_tab_unified_widget
-bindkey '^[m' fzf_man_opts_widget
-
+bindkey -r '^[m' 2>/dev/null || true

@@ -1,16 +1,15 @@
 # RTFM (Read The Fuzzy Manual)
 
-A **zsh** plugin that binds **one intelligent Tab (`^I`)** and **Alt-m (`^[m`)** to a single ZLE widget. It gives you **fuzzy access to manual pages and `--help` output** without installing a second Tab-completion plugin that fights for the same key.
-
-You wanted **seamless manual/help access**; you also wanted **path-aware Tab** (files, `cd`, `source`, command names) in the same place so two plugins would not compete for Tab. RTFM implements that as a **priority-ordered dispatcher**: try source/dot arguments, then `cd`/`pushd`, then generic paths, then first-token command picking, then “RTFM” option/subcommand picking, and only if nothing matches does it fall through to stock `expand-or-complete`.
+A **zsh** plugin that binds **Tab (`^I`)** to a two-phase widget: complete the command from `$PATH` and builtins, then (after a space) complete from the man page plus immediate files/dirs when that makes sense.
 
 ---
 
 ## What it does (short)
 
-It provides autocomplete suggestions from a fuzzy list that reads the manual, help file and history.
-
-Special cases: **`ip`**, **`docker`**, **`sv`** (runit) have tailored parsers so lists match those CLIs. **`sv`** can list **services** under `$SVDIR` once a verb is on the line.
+- **First word, no space yet:** Tab completes **PATH executables and shell builtins**. One prefix match is inserted with a space; several matches open **fzf** (history frequency, then alphabetical). An empty line opens the full command list.
+- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path. A token starting with `-` is options only. Typing a directory (`src/`) lists that directory one level at a time.
+- Wrappers (`sudo`, `doas`, `command`, `builtin`, `env`, `time`, `nice`, `nohup`) are skipped so Tab sees the real command.
+- Special parsers: **`ip`**, **`docker`**, **`sv`** (runit).
 
 Details on sources and tools: **[ATTRIBUTIONS.md](ATTRIBUTIONS.md)**.
 
@@ -64,8 +63,8 @@ fzf_rtfm_rebind_tab
 
 ## Keys and `fzf` UI
 
-- **Tab (`^I`)** — unified widget (`fzf_tab_unified_widget` → `fzf_tab_unified_impl`)
-- **Alt-m (`^[m`)** — same implementation (`fzf_man_opts_widget`)
+- **Tab (`^I`)** — first word (no trailing space): `$PATH` + builtins (`gi<Tab>` unique insert, else fzf). After a space: man/--help tokens, then immediate files/dirs when usage looks like it takes a path. `-` tokens are options only. A typed directory (`src/`) lists that directory one level deep.
+- **Alt-m** — not bound (Tab only)
 
 Inside **fzf**:
 
@@ -256,11 +255,10 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 
 ### Widget entrypoints
 
-- **`fzf_tab_unified_impl`** — Runs try-chain: **source → cd → path → command → rtfm** → else **`zle .expand-or-complete`**.
-- **`fzf_man_opts_widget`** — Alias to unified impl.
-- **`fzf_rtfm_rebind_tab`** — **`bindkey '^I' fzf_tab_unified_widget`** helper after **`compinit`**.
+- **`fzf_tab_unified_impl`** — Command-name Tab, else man+files mixed picker. Does not fall through to stock completion.
+- **`fzf_rtfm_rebind_tab`** — **`bindkey '^I'`** helper after **`compinit`** / **`fzf --zsh`**; also unbinds Alt-m.
 
-At file bottom, **`zle -N`** registers widgets and default **`bindkey`** for **`^I`** and **`^m`**.
+At file bottom, **`zle -N`** registers the Tab widget and **`bindkey '^I'`**. Alt-m is not bound.
 
 ---
 
