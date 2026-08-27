@@ -29,9 +29,11 @@
 # Use a real path (container / remote workspace paths may differ from ~/... on the host).
 # Tab:
 # - First word with no trailing space (or an empty line): $PATH executables + builtins.
+#   Path-shaped first token (./, ../, /..., ~/): list that directory’s immediate files/dirs, not PATH.
 #   Exact prefix match of one name inserts "name ". Several matches: fzf (history then alphabetical).
 # - After a space following the real command: man/--help tokens, then cwd files/dirs when usage
 #   looks like it takes a path. Token starting with "-" is options only.
+# - cd/pushd after a space: zsh -L/-P, "..", then directories only (not Tcl man / man -k ^cd-).
 # - Typed directory prefix (src/, ../): list that directory’s immediate children; pick a dir → "name/"
 #   with no space so the next Tab walks one level deeper.
 # - Wrappers skipped: sudo doas command builtin env time nice nohup
@@ -1424,16 +1426,64 @@ __fzf_rtfm_docs_text() {
   __fzf_get_help_text "$cmd" 2>/dev/null
 }
 
+__fzf_last_word_is_pathlike() {
+  local w="$1"
+  [[ -n "$w" ]] || return 1
+  [[ "$w" == /* || "$w" == ./ || "$w" == ./* || "$w" == ../ || "$w" == ../* || "$w" == '~'* || "$w" == */* ]]
+}
+
 __fzf_tab_immediate_file_rows() {
   setopt localoptions noshwordsplit
-  local dir="$1" p name
+  local dir="$1" mode="${2:-all}" p name
   [[ -d "$dir" ]] || return 0
-  command find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null \
-    | command sort | while IFS= read -r p; do
-        [[ -z "$p" ]] && continue
-        name="${p#./}"
-        print -r -- "$name"$'\tf\t'
-      done
+  local keep_dotslash=0
+  [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
+  # Parent dir so cd in a leaf folder (only .git, etc.) can still go up.
+  if [[ "$dir" != / ]]; then
+    local up
+    if [[ "$dir" == . || "$dir" == ./ ]]; then
+      if (( keep_dotslash )); then
+        up='../'
+      else
+        up='..'
+      fi
+    else
+      up="${dir%/}/.."
+    fi
+    print -r -- "$up"$'\tf\t'
+  fi
+  {
+    if [[ "$mode" == dirs ]]; then
+      command find "$dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \)
+    else
+      command find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \)
+    fi
+  } 2>/dev/null | command sort | while IFS= read -r p; do
+      [[ -z "$p" ]] && continue
+      if [[ "$mode" == dirs ]] && [[ ! -d "$p" ]]; then
+        continue
+      fi
+      name="${p#./}"
+      if (( keep_dotslash )); then
+        [[ "$name" == ./* ]] || name="./$name"
+      fi
+      print -r -- "$name"$'\tf\t'
+    done
+}
+
+__fzf_tab_try_path_firstword() {
+  setopt localoptions noshwordsplit
+  [[ -n "$lastw" ]] || return 1
+  __fzf_last_word_is_pathlike "$lastw" || return 1
+  local dir base q picked rc file_rows
+  dir='.' base=''
+  __fzf_tab_path_token_dir_base
+  file_rows="$(__fzf_tab_immediate_file_rows "$dir" all)"
+  [[ -n "$file_rows" ]] || { zle redisplay; return 0; }
+  q="$base"
+  picked="$(__fzf_pick_mixed "$file_rows" 'path> ' "$q")"
+  rc=$?
+  __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_apply_mixed_pick || return
 }
 
 __fzf_pick_mixed() {
@@ -1548,24 +1598,36 @@ __fzf_tab_try_rtfm() {
   fi
 
   entries=""
-  if entries="$(__fzf_build_entries "$cmd" "$sub" "${LBUFFER}${RBUFFER}" 2>/dev/null)"; then
-    :
-  else
-    entries=""
+  if [[ "$cmd" != cd && "$cmd" != pushd ]]; then
+    if entries="$(__fzf_build_entries "$cmd" "$sub" "${LBUFFER}${RBUFFER}" 2>/dev/null)"; then
+      :
+    else
+      entries=""
+    fi
   fi
 
   local man_rows=""
-  if [[ -n "$entries" ]]; then
-    man_rows="$(print -r -- "$entries" | command awk -F '\t' 'NF { print $1 "\tm\t" $2 }')"
-  fi
-
   local file_rows=""
-  if [[ "$lastw" != -* ]]; then
-    docs="$(__fzf_rtfm_docs_text "$cmd" "$sub" 2>/dev/null)" || docs=""
-    if [[ -n "$docs" ]] && __fzf_rtfm_text_wants_files "$docs"; then
+
+  if [[ "$cmd" == cd || "$cmd" == pushd ]]; then
+    # Do not use man cd (often Tcl) or man -k ^cd- (cd-paranoia as fake subcommands).
+    man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
+    if [[ "$lastw" != -* ]]; then
       dir='.' base=''
       __fzf_tab_path_token_dir_base
-      file_rows="$(__fzf_tab_immediate_file_rows "$dir")"
+      file_rows="$(__fzf_tab_immediate_file_rows "$dir" dirs)"
+    fi
+  else
+    if [[ -n "$entries" ]]; then
+      man_rows="$(print -r -- "$entries" | command awk -F '\t' 'NF { print $1 "\tm\t" $2 }')"
+    fi
+    if [[ "$lastw" != -* ]]; then
+      docs="$(__fzf_rtfm_docs_text "$cmd" "$sub" 2>/dev/null)" || docs=""
+      if [[ -n "$docs" ]] && __fzf_rtfm_text_wants_files "$docs"; then
+        dir='.' base=''
+        __fzf_tab_path_token_dir_base
+        file_rows="$(__fzf_tab_immediate_file_rows "$dir" all)"
+      fi
     fi
   fi
 
@@ -1586,6 +1648,10 @@ __fzf_tab_try_rtfm() {
 fzf_tab_unified_impl() {
   setopt localoptions noshwordsplit extended_glob
   __fzf_zle_token_state
+  if __fzf_tab_completing_command_name && [[ -n "$lastw" ]] && __fzf_last_word_is_pathlike "$lastw"; then
+    __fzf_tab_try_path_firstword || zle redisplay
+    return 0
+  fi
   if __fzf_tab_try_command; then
     return 0
   fi
