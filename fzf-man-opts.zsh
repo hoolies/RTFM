@@ -34,11 +34,12 @@
 # - After a space following the real command: man/--help tokens, then cwd files/dirs when usage
 #   looks like it takes a path. Token starting with "-" is options only.
 # - cd/pushd after a space: zsh -L/-P, "..", then directories only (not Tcl man / man -k ^cd-).
-# - Typed directory prefix (src/, ../): list that directory’s immediate children; pick a dir → "name/"
-#   with no space so the next Tab walks one level deeper.
+# - Typed directory prefix (src/, ../): list that directory’s immediate children. Tab on a
+#   directory keeps fzf open and lists that directory’s children. Tab on a file or man token
+#   inserts it. Enter inserts the current pick and runs the line. Esc leaves the line unchanged.
 # - Wrappers skipped: sudo doas command builtin env time nice nohup
 # - Special parsers: ip, docker, sv (then files by the same usage rule)
-# - No Alt-m bind. Esc leaves the line unchanged. One row per Tab.
+# - No Alt-m bind. One picker per Tab (directory Tab stays inside that picker).
 # - Uses man pages (and sub-man pages like git-status) when available, else --help / -h
 # - UI: left token, right description (man text, or size+permissions for files)
 # - Uses man pages (and sub-man pages like `git-commit`) when available
@@ -54,8 +55,9 @@
 #   * Keymaps:
 #       arrows / Ctrl-J / Ctrl-K to move
 #       Left/Right or Ctrl-H/Ctrl-L to scroll preview up/down
-#       Tab/Enter to accept
-#       Esc to abort without modifying the command line
+#       Tab: descend into a directory (fzf stays open); accept a file/option
+#       Enter: accept the current pick and run the command
+#       Esc: abort without modifying the command line
 #
 # Diagnostic (after source):  fzf_diagnose_cmd git   # or __fzf_diagnose_cmd sv
 # If fzf opens but typing does not appear in the query:  fzf_rtfm_diagnose  (paste output when asking for help)
@@ -140,6 +142,14 @@ __fzf_rtfm_fzf_binds_preview=(
   --bind 'left:preview-up,right:preview-down'
   --bind 'ctrl-h:preview-up,ctrl-l:preview-down'
   --bind 'tab:accept,enter:accept'
+  --bind 'esc:abort'
+)
+# Path/man mixed picker: Tab/Enter are --expect keys (see __fzf_pick_mixed), not accept binds.
+typeset -ga __fzf_rtfm_fzf_binds_preview_nav
+__fzf_rtfm_fzf_binds_preview_nav=(
+  --bind 'ctrl-j:down,ctrl-k:up'
+  --bind 'left:preview-up,right:preview-down'
+  --bind 'ctrl-h:preview-up,ctrl-l:preview-down'
   --bind 'esc:abort'
 )
 typeset -ga __fzf_rtfm_fzf_binds_basic
@@ -1475,23 +1485,28 @@ __fzf_tab_try_path_firstword() {
   setopt localoptions noshwordsplit
   [[ -n "$lastw" ]] || return 1
   __fzf_last_word_is_pathlike "$lastw" || return 1
-  local dir base q picked rc file_rows
+  local dir base q file_rows
   dir='.' base=''
   __fzf_tab_path_token_dir_base
   file_rows="$(__fzf_tab_immediate_file_rows "$dir" all)"
   [[ -n "$file_rows" ]] || { zle redisplay; return 0; }
   q="$base"
-  picked="$(__fzf_pick_mixed "$file_rows" 'path> ' "$q")"
-  rc=$?
-  __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_apply_mixed_pick || return
+  __fzf_rtfm_browse_apply "" "$file_rows" 'path> ' "$q" all || return
 }
 
 __fzf_pick_mixed() {
   local entries="$1" prompt="$2" query="${3-}"
-  local selection fzf_ec=0 ps
-  local -a qopts=()
+  local with_expect="${4-}"
+  local mode="${5:-all}"
+  local selection fzf_ec=0 ps state lister transformer
+  local -a qopts=() expect_opts=() bind_opts=()
+  local keep_dotslash=0
+  [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
   [[ -n "$query" ]] && qopts=(--query="$query")
   ps=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-prev.XXXXXX")
+  state=
+  lister=
+  transformer=
   {
     print -r '#!/bin/sh'
     print -r 'line=$1'
@@ -1504,11 +1519,77 @@ __fzf_pick_mixed() {
   } >"$ps"
   command chmod +x "$ps"
 
+  if [[ -n "$with_expect" ]]; then
+    state=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-nav.XXXXXX")
+    lister=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-ls.XXXXXX")
+    transformer=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-tr.XXXXXX")
+    : >"$state"
+    {
+      print -r '#!/bin/sh'
+      print -r "statefile='$state'"
+      print -r "mode='$mode'"
+      print -r "keep_dotslash='$keep_dotslash'"
+      print -r 'dir=$(cat "$statefile")'
+      print -r '[ -n "$dir" ] || exit 0'
+      print -r '[ -d "$dir" ] || exit 0'
+      print -r 'if [ "$dir" != / ]; then'
+      print -r '  if [ "$dir" = . ] || [ "$dir" = ./ ]; then'
+      print -r '    if [ "$keep_dotslash" = 1 ]; then'
+      print -r "      up='../'"
+      print -r '    else'
+      print -r "      up='..'"
+      print -r '    fi'
+      print -r '  else'
+      print -r '    up="${dir%/}/.."'
+      print -r '  fi'
+      print -r $'  printf \'%s\\tf\\t\\n\' "$up"'
+      print -r 'fi'
+      print -r 'if [ "$mode" = dirs ]; then'
+      print -r '  find "$dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \)'
+      print -r 'else'
+      print -r '  find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \)'
+      print -r 'fi 2>/dev/null | sort | while IFS= read -r p; do'
+      print -r '  [ -z "$p" ] && continue'
+      print -r '  if [ "$mode" = dirs ] && [ ! -d "$p" ]; then'
+      print -r '    continue'
+      print -r '  fi'
+      print -r '  name=${p#./}'
+      print -r '  if [ "$keep_dotslash" = 1 ]; then'
+      print -r '    case "$name" in'
+      print -r '      ./*) ;;'
+      print -r '      *) name="./$name" ;;'
+      print -r '    esac'
+      print -r '  fi'
+      print -r $'  printf \'%s\\tf\\t\\n\' "$name"'
+      print -r 'done'
+    } >"$lister"
+    {
+      print -r '#!/bin/sh'
+      print -r "statefile='$state'"
+      print -r "lister='$lister'"
+      print -r 'tok=$1'
+      print -r 'if [ -d "$tok" ]; then'
+      print -r '  printf "%s\n" "$tok" > "$statefile"'
+      print -r '  printf "reload(%s)+clear-query\n" "$lister"'
+      print -r 'else'
+      print -r '  printf "accept\n"'
+      print -r 'fi'
+    } >"$transformer"
+    command chmod +x "$lister" "$transformer"
+    expect_opts=(--expect=tab,enter)
+    bind_opts=(
+      "${__fzf_rtfm_fzf_binds_preview_nav[@]}"
+      --bind "tab:transform:$transformer {1}"
+    )
+  else
+    bind_opts=("${__fzf_rtfm_fzf_binds_preview[@]}")
+  fi
+
   local -i __fzf_mixed_done=0
   __fzf_mixed_fin() {
     ((__fzf_mixed_done)) && return 0
     __fzf_mixed_done=1
-    command rm -f "$ps"
+    command rm -f "$ps" "$state" "$lister" "$transformer"
     __fzf_rtfm_zle_parent_tty_restore
     __fzf_tty_refreeze
   }
@@ -1528,7 +1609,8 @@ __fzf_pick_mixed() {
       --tiebreak=begin,length \
       --preview="$ps {}" \
       --preview-window="$__fzf_rtfm_fzf_preview_window" \
-      "${__fzf_rtfm_fzf_binds_preview[@]}" \
+      "${bind_opts[@]}" \
+      "${expect_opts[@]}" \
       "${qopts[@]}"
     fzf_ec=${pipestatus[-1]}
     __fzf_rtfm_stty_restore
@@ -1580,11 +1662,71 @@ __fzf_apply_mixed_pick() {
   fi
 }
 
+# ZLE-only (do not call from $(...)): Tab on a dir reloads that directory’s
+# children in the same fzf (loop fallback if reload is unavailable). Tab on a
+# file/option inserts; Enter inserts and runs; Esc leaves the line as-is.
+__fzf_rtfm_browse_apply() {
+  setopt localoptions noshwordsplit
+  local man_rows="$1" file_rows="$2" prompt="$3" q="$4" mode="$5"
+  local use_man=1
+  local mixed raw rc key row kind tok
+  local show_prompt="$prompt"
+
+  while true; do
+    if (( use_man )); then
+      mixed="$(printf '%s\n%s\n' "$man_rows" "$file_rows" | command awk 'NF')"
+    else
+      mixed="$(printf '%s\n' "$file_rows" | command awk 'NF')"
+    fi
+    if [[ -z "$mixed" ]]; then
+      zle redisplay
+      return 0
+    fi
+
+    raw="$(__fzf_pick_mixed "$mixed" "$show_prompt" "$q" expect "$mode")"
+    rc=$?
+    if (( rc == 2 )); then
+      zle redisplay
+      return 0
+    fi
+    (( rc != 0 )) && return 1
+
+    key="${raw%%$'\n'*}"
+    if [[ "$raw" == *$'\n'* ]]; then
+      row="${raw#*$'\n'}"
+      row="${row%$'\n'}"
+    else
+      row="$raw"
+      key=""
+    fi
+    [[ -z "$row" ]] && { zle redisplay; return 0; }
+
+    kind="${row#*$'\t'}"
+    kind="${kind%%$'\t'*}"
+    tok="${row%%$'\t'*}"
+
+    if [[ "$key" == tab && "$kind" == f && -n "$tok" && -d "$tok" ]]; then
+      lastw="${tok%/}/"
+      file_rows="$(__fzf_tab_immediate_file_rows "$tok" "$mode")"
+      use_man=0
+      q=""
+      show_prompt="${prompt}${tok%/}/"
+      continue
+    fi
+
+    __fzf_apply_mixed_pick "$row"
+    if [[ "$key" == enter ]]; then
+      zle accept-line
+    fi
+    return 0
+  done
+}
+
 __fzf_tab_try_rtfm() {
   setopt localoptions noshwordsplit
   __fzf_tab_completing_command_name && return 1
 
-  local parsed cmd sub entries docs picked rc dir base q
+  local parsed cmd sub entries docs dir base q
   parsed="$(__fzf_get_cmd_and_sub)" || return 1
   cmd="${parsed%%$'\t'*}"
   sub="${parsed#*$'\t'}"
@@ -1640,9 +1782,9 @@ __fzf_tab_try_rtfm() {
     q="$base"
   fi
 
-  picked="$(__fzf_pick_mixed "$mixed" "$cmd > " "$q")"
-  rc=$?
-  __fzf_tab_finish_fzf_pick "$rc" "$picked" __fzf_apply_mixed_pick || return
+  local mode=all
+  [[ "$cmd" == cd || "$cmd" == pushd ]] && mode=dirs
+  __fzf_rtfm_browse_apply "$man_rows" "$file_rows" "$cmd > " "$q" "$mode" || return
 }
 
 fzf_tab_unified_impl() {
