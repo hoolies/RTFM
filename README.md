@@ -7,7 +7,7 @@ A **zsh** plugin that binds **Tab (`^I`)** to a two-phase widget: complete the c
 ## What it does (short)
 
 - **First word, no space yet:** Tab completes **PATH executables and shell builtins**. One prefix match is inserted with a space; several matches open **fzf** (history frequency, then alphabetical). An empty line opens the full command list.
-- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path. A token starting with `-` is options only. Typing a directory (`src/`) lists that directory one level at a time. **Tab** on a directory keeps fzf open on that directory’s children; **Enter** inserts the pick and runs the line; **Esc** aborts.
+- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path. A token starting with `-` is options only. Typing a directory (`src/`) lists that directory one level at a time. **Tab** on a directory keeps fzf open on that directory’s children; **Enter** inserts the pick and returns to the prompt; **Esc** aborts.
 - Wrappers (`sudo`, `doas`, `command`, `builtin`, `env`, `time`, `nice`, `nohup`) are skipped so Tab sees the real command.
 - Special parsers: **`ip`**, **`docker`**, **`sv`** (runit).
 
@@ -71,7 +71,7 @@ Inside **fzf**:
 - Move: arrows, **Ctrl-j** / **Ctrl-k**
 - Scroll preview: **Left/Right** or **Ctrl-h** / **Ctrl-l**
 - **Tab** — directory: stay in fzf and list that directory’s children. File or man token: insert and return to the prompt
-- **Enter** — insert the current pick and run the command
+- **Enter** — insert the current pick and return to the prompt (does not run the command)
 - **Esc** — abort without changing the command line
 
 Preview column shows descriptions; fuzzy search targets the **token** column (where applicable).
@@ -252,7 +252,7 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 
 ### RTFM from tab dispatcher
 
-- **`__fzf_rtfm_browse_apply`** — Mixed path/man picker (ZLE only, not `$(…)`): **Tab** on a dir reloads that directory’s children in the same fzf; **Tab** on a file/option inserts; **Enter** inserts and **`zle accept-line`**; **Esc** leaves the line unchanged.
+- **`__fzf_rtfm_browse_apply`** — Mixed path/man picker (ZLE only, not `$(…)`): **Tab** on a dir reloads that directory’s children in the same fzf; **Tab** on a file/option inserts; **Enter** inserts and returns to the prompt; **Esc** leaves the line unchanged.
 - **`__fzf_tab_try_rtfm`** — Parses cmd/sub, **`__fzf_build_entries`**, **`__fzf_rtfm_browse_apply`**.
 
 ### Widget entrypoints

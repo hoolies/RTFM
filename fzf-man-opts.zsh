@@ -36,7 +36,7 @@
 # - cd/pushd after a space: zsh -L/-P, "..", then directories only (not Tcl man / man -k ^cd-).
 # - Typed directory prefix (src/, ../): list that directory’s immediate children. Tab on a
 #   directory keeps fzf open and lists that directory’s children. Tab on a file or man token
-#   inserts it. Enter inserts the current pick and runs the line. Esc leaves the line unchanged.
+#   inserts it. Enter inserts the current pick and leaves you on the line. Esc leaves the line unchanged.
 # - Wrappers skipped: sudo doas command builtin env time nice nohup
 # - Special parsers: ip, docker, sv (then files by the same usage rule)
 # - No Alt-m bind. One picker per Tab (directory Tab stays inside that picker).
@@ -56,7 +56,7 @@
 #       arrows / Ctrl-J / Ctrl-K to move
 #       Left/Right or Ctrl-H/Ctrl-L to scroll preview up/down
 #       Tab: descend into a directory (fzf stays open); accept a file/option
-#       Enter: accept the current pick and run the command
+#       Enter: accept the current pick and return to the prompt (does not run)
 #       Esc: abort without modifying the command line
 #
 # Diagnostic (after source):  fzf_diagnose_cmd git   # or __fzf_diagnose_cmd sv
@@ -1664,7 +1664,7 @@ __fzf_apply_mixed_pick() {
 
 # ZLE-only (do not call from $(...)): Tab on a dir reloads that directory’s
 # children in the same fzf (loop fallback if reload is unavailable). Tab on a
-# file/option inserts; Enter inserts and runs; Esc leaves the line as-is.
+# file/option inserts; Enter inserts and returns to the prompt; Esc leaves the line as-is.
 __fzf_rtfm_browse_apply() {
   setopt localoptions noshwordsplit
   local man_rows="$1" file_rows="$2" prompt="$3" q="$4" mode="$5"
@@ -1715,9 +1715,6 @@ __fzf_rtfm_browse_apply() {
     fi
 
     __fzf_apply_mixed_pick "$row"
-    if [[ "$key" == enter ]]; then
-      zle accept-line
-    fi
     return 0
   done
 }
