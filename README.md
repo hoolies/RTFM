@@ -1,17 +1,100 @@
 # RTFM (Read The Fuzzy Manual)
 
-A **zsh** plugin that binds **Tab (`^I`)** to a two-phase widget: complete the command from `$PATH` and builtins, then (after a space) complete from the man page plus immediate files/dirs when that makes sense.
+A **zsh** plugin that binds **Tab (`^I`)** to a fuzzy **fzf** picker for:
+
+1. Completing the **command** (PATH + shell builtins)
+2. Completing **options / arguments** from man pages or `--help`
+3. Browsing **files and directories** when that makes sense
+
+Enter never runs the command — it only inserts text onto the line.
+
+Details on sources and tools: **[ATTRIBUTIONS.md](ATTRIBUTIONS.md)**.
 
 ---
 
-## What it does (short)
+## Features
 
-- **First word, no space yet:** Tab completes **PATH executables and shell builtins**. One prefix match is inserted with a space; several matches open **fzf** (history frequency, then alphabetical). An empty line opens the full command list. After the command is inserted (`cmd `), Tab continues into the **options/arguments** picker in the same gesture (no second Tab).
-- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path (cwd lists also include **`/`**). A token starting with `-` is options only. Typing a directory (`src/`, `/`) lists **directories only at depth 1** and hides man options/arguments. **Tab** on a non-empty directory shows that directory’s immediate children (depth 1 again; files+dirs for path commands; dirs only for `cd`/`pushd`). **Tab** on a file, option, or empty directory inserts it and keeps the picker open. Parent `..` entries are not listed. **Alt-.** toggles hidden names (shown by default; fzf cannot bind Ctrl-.); **Enter** inserts the pick and returns to the shell; **Esc** aborts.
-- Wrappers (`sudo`, `doas`, `command`, `builtin`, `env`, `time`, `nice`, `nohup`) are skipped so Tab sees the real command.
-- Special parsers: **`ip`**, **`docker`**, **`sv`** (runit).
+### Command completion (first word)
 
-Details on sources and tools: **[ATTRIBUTIONS.md](ATTRIBUTIONS.md)**.
+- Tab with no trailing space completes **PATH executables** and selected **shell builtins**.
+- **One** prefix match → insert `name ` and open the options/arguments picker in the **same** Tab.
+- **Several** matches → fzf command list (history frequency, then alphabetical).
+- Empty line → full command list.
+- Path-shaped first token (`./`, `../`, `/…`, `~/…`) → list that directory (not PATH).
+
+### Options and arguments (after a space)
+
+- Tab after `cmd ` opens fzf with **man / `--help` / `-h`** tokens when available.
+- Subcommand man pages are used when present (e.g. `git-status`, `git-commit`).
+- A token starting with `-` shows **options only** (no file list).
+- Files/dirs are mixed in when usage/SYNOPSIS looks like it takes a path (`FILE`, `PATH`, `<file>`, …).
+- Cwd listings include a top-level **`/`** entry.
+- Fuzzy filter applies to the **token** column (left); the description is preview-only.
+
+### Path browsing
+
+- Listings are always **depth 1** (one level at a time).
+- Typed directory (`src/`, `/`, existing dir) → **directories only**, **no** man options/arguments.
+- **`/`** listing skips `/proc`, `/sys`, `/dev`, `/run`.
+- Parent **`..`** entries are never listed.
+- Hidden names (dotfiles) are shown by default; toggle with **Alt-.** (fzf cannot bind Ctrl-.).
+
+### Tab vs Enter inside the picker
+
+| Key | Behavior |
+|-----|----------|
+| **Tab** on a **non-empty directory** | Zoom into that directory (depth 1 children; files+dirs for path commands; dirs only for `cd`/`pushd`) |
+| **Tab** on a **file, option, or empty directory** | Insert it (trailing space) and **keep the picker open** for the next token |
+| **Enter** | Insert the current pick and **return to the shell** (does not run the command) |
+| **Esc** | Abort; leave the command line unchanged |
+
+Empty directory + Tab is useful for multi-arg paths, e.g. `mv /src /dst`.
+
+### Ctrl-f regex search (options view only)
+
+Available when man options/arguments are shown (not in path-only browse).
+
+1. **Ctrl-f** — prompt becomes `regex> ` (typed text is visible; fuzzy filtering pauses)
+2. Type a **case-sensitive regex** over option tokens and descriptions
+3. **Enter** — **filter** the list to all matches (does not insert)
+4. Browse with **arrows** or **n** (next) / **N** or **p** (previous)
+5. **Tab** / **Enter** — insert as usual; **Esc** — cancel typing or clear the filter
+
+### In-picker help
+
+- **?** — open a pager with keybindings and how to use the plugin (**q** to close)
+
+### Wrappers
+
+These prefixes are skipped so Tab sees the real command:
+
+`sudo` · `doas` · `command` · `builtin` · `env` · `time` · `nice` · `nohup`
+
+### `cd` / `pushd`
+
+- Does **not** use Tcl `man cd` or `man -k ^cd-` noise.
+- Offers zsh **`-L`** / **`-P`**, then **directories only**.
+- Path token → directories only (no option rows).
+
+### Special command parsers
+
+| Command | Behavior |
+|---------|----------|
+| **`ip`** | OBJECT list from `ip(8)` + global OPTIONS; after an object, verbs/options from `ip-<object>` man pages |
+| **`docker`** | `docker --help` commands/options; after a subcommand, `docker SUB --help` |
+| **`sv`** (runit) | OPTIONS + verbs; after a verb, service names from `$SVDIR` (default `/service`, else `/var/service`) |
+
+### Preview pane
+
+- **Options / arguments:** man or help description
+- **Files:** `ls -ld` plus contents (text via `head`; binary summarized with `file`)
+- **Directories:** `ls -ld` plus a short `ls -la` of children
+- Scroll preview with **Left/Right** or **Ctrl-h** / **Ctrl-l**
+
+### UI
+
+- Centered floating fzf window (rounded border, margin/padding)
+- Left ~20%: token · Right ~80%: preview
 
 ---
 
@@ -19,9 +102,9 @@ Details on sources and tools: **[ATTRIBUTIONS.md](ATTRIBUTIONS.md)**.
 
 - **zsh** (interactive; ZLE required)
 - **fzf** on `PATH`
-- **rg** (ripgrep) — used for small filters (`usage:` detection, feature probes)
+- **rg** (ripgrep) — small filters (`usage:` detection, feature probes)
 - **man** + **col** — manpage text
-- Optional: **fd**, **fzf-tmux**, **timeout**, **GNU/BSD find**
+- Optional: **less** or **more** (help popup), **fd**, **fzf-tmux**, **timeout**, GNU/BSD **find**
 
 ---
 
@@ -32,14 +115,14 @@ Details on sources and tools: **[ATTRIBUTIONS.md](ATTRIBUTIONS.md)**.
 ```zsh
 # In ~/.zshrc (use your real clone path)
 source ~/path/to/RTFM/fzf-man-opts.zsh
+# or:
+source ~/path/to/RTFM/rtfm.plugin.zsh
 ```
 
 ### Oh My Zsh
 
-Clone into custom plugins:
-
 ```bash
-git clone https://github.com/hoolies/RTFM.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/fzf-man-opts.zsh
+git clone https://github.com/hoolies/RTFM.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/rtfm
 ```
 
 Add `rtfm` to `plugins=(… rtfm …)` in `~/.zshrc`.
@@ -61,22 +144,29 @@ fzf_rtfm_rebind_tab
 
 ---
 
-## Keys and `fzf` UI
+## Keys
 
-- **Tab (`^I`)** — first word (no trailing space): `$PATH` + builtins (`gi<Tab>` unique insert, else fzf), then the options/arguments picker opens automatically. After a space: man/--help tokens, then cwd files/dirs (one level) when usage looks like it takes a path. `-` tokens are options only. A typed directory (`src/`, `/`) lists directories only at depth 1; Tab steps one level into a directory or selects a file.
-- **Alt-m** — not bound (Tab only)
+### At the shell (ZLE)
 
-Inside **fzf**:
+| Key | Action |
+|-----|--------|
+| **Tab (`^I`)** | Command complete → options/args/paths picker (see Features) |
+| **Alt-m** | Not bound |
 
-- Move: arrows, **Ctrl-j** / **Ctrl-k**
-- Scroll preview: **Left/Right** or **Ctrl-h** / **Ctrl-l**
-- **Tab** — non-empty directory: show that directory’s immediate children (depth 1). File, option, or empty directory: insert it (with a trailing space) and **keep the picker open** for the next token
-- **Alt-.** — toggle hidden names (dotfiles); on by default. fzf cannot bind Ctrl-.
-- **Ctrl-f** — (options/arguments view only) case-sensitive **regex** search over option tokens and descriptions. The prompt becomes `regex> ` so you can see what you type; press **Enter** to **filter** the list to all matches (browse with arrows or **n** / **N**|**p**). **Esc** cancels typing or clears the filter (or aborts the picker if neither).
-- **Enter** — insert the current pick and **return to the shell** (does not run the command). While typing a Ctrl-f regex, Enter runs the filter instead.
-- **Esc** — abort without changing the command line (or clear Ctrl-f search when active)
+### Inside fzf
 
-Preview column shows man descriptions, or for paths: `ls -ld` plus file contents (directories list their children). **Ctrl-h** / **Ctrl-l** (and Left/Right) scroll the preview. Fuzzy search targets the **token** column.
+| Key | Action |
+|-----|--------|
+| Arrows / **Ctrl-j** / **Ctrl-k** | Move selection |
+| **Left/Right** or **Ctrl-h** / **Ctrl-l** | Scroll preview |
+| Type | Fuzzy-filter the token column |
+| **Tab** | Zoom into non-empty dir, or insert file/option/empty-dir and stay open |
+| **Enter** | Insert pick and return to the shell (or run Ctrl-f filter while composing a regex) |
+| **Esc** | Abort, or cancel Ctrl-f compose / clear filter |
+| **Alt-.** | Toggle hidden names (dotfiles) |
+| **Ctrl-f** | Regex search over options/arguments (case-sensitive); see Features |
+| **n** / **N** \| **p** | Next / previous match after a Ctrl-f filter |
+| **?** | Help popup (press **q** to close) |
 
 ---
 
@@ -84,12 +174,28 @@ Preview column shows man descriptions, or for paths: `ls -ld` plus file contents
 
 | Variable | Meaning |
 |----------|---------|
-| `FZF_RTFM_USE_TMUX` | Non-zero + valid `TMUX_PANE` → use `fzf-tmux` (helps some tmux setups) |
-| `FZF_RTFM_TMUX_OPTS` | Extra args for `fzf-tmux` (zsh word-split via `${=…}`) |
-| `FZF_RTFM_HIST_DEPTH` | Max `fc` lines for **source/cd** merged history and **command** history stats (default `4000`) |
-| `FZF_RTFM_NO_PATH_SCHEME` | Set to `1` to omit `--scheme path` for old fzf |
+| `FZF_RTFM_USE_TMUX` | Non-zero + valid `TMUX_PANE` → use `fzf-tmux` (helps some tmux setups where typing fails) |
+| `FZF_RTFM_TMUX_OPTS` | Extra args for `fzf-tmux` (zsh word-split via `${=…}`); default `-d 90%` |
+| `FZF_RTFM_HIST_DEPTH` | Max `fc` lines for history-based ranking (default `4000`) |
+| `FZF_RTFM_NO_PATH_SCHEME` | Set to `1` to omit `--scheme path` for very old fzf |
+| `SVDIR` | Runit service directory for `sv` (default `/service`, fallback `/var/service`) |
 
-You can override **`typeset -ga __fzf_rtfm_fzf_window_common`** and related arrays **after** sourcing to tweak all pickers at once (see script header).
+You can override **`typeset -ga __fzf_rtfm_fzf_window_common`** and the shared bind arrays **after** sourcing to tweak all pickers at once.
+
+---
+
+## Quick examples
+
+```text
+ls<Tab>                 → insert "ls ", open options + files
+ls <Tab>                → same picker after a space
+git sta<Tab>            → command/subcommand flow via man pages
+cat /<Tab>              → directories under / only (no man options)
+cd src/<Tab>            → directories under src/ only
+mv <Tab> …              → Tab inserts paths and stays open for /dst
+ls <Tab> then Ctrl-f    → regex> author|help  → Enter → filtered matches
+?                       → help while any picker is open
+```
 
 ---
 
@@ -100,14 +206,17 @@ fzf_diagnose_cmd git    # how man/help looks for a command
 fzf_rtfm_diagnose        # paste output when debugging terminal/fzf/tty issues
 ```
 
+If Tab still runs only stock completion, call `fzf_rtfm_rebind_tab` at the end of `~/.zshrc`.  
+If typing in fzf fails inside tmux: `export FZF_RTFM_USE_TMUX=1`.
+
 ---
 
 ## Repository layout
 
 | File | Role |
 |------|------|
-| `fzf-man-opts.zsh` | Full implementation (~1.7k lines) |
-| `rtfm` | One-line `source` of the implementation (short path) |
+| `fzf-man-opts.zsh` | Full implementation |
+| `rtfm` | One-line `source` of the implementation |
 | `rtfm.plugin.zsh` | Oh My Zsh-style loader |
 | `ATTRIBUTIONS.md` | Credits, dependencies, inspiration |
 | `LICENSE` | MIT |
@@ -138,135 +247,66 @@ git push -u origin main
 
 ## Function reference (nitty-gritty)
 
-Functions are **private** (`__fzf_*`) except the public helpers and widget entrypoints at the bottom. **Nested** functions (e.g. `__fzf_pick__fin`) exist only to pair with `trap` cleanup and are noted under their caller.
+Functions are **private** (`__fzf_*`) except the public helpers and widget entrypoints. **Nested** functions (e.g. `__fzf_pick__fin`) exist only to pair with `trap` cleanup.
 
 ### Load-time configuration
 
-- **`__fzf_rtfm_merged_path_scheme`** — Global array: either empty or `( --scheme path )` if fzf supports it (probe via `fzf --help | rg`).
-- **`__fzf_rtfm_fzf_window_common`** — Shared `fzf` geometry: height, min-height, layout, border, margin, padding.
-- **`__fzf_rtfm_fzf_binds_preview` / `__fzf_rtfm_fzf_binds_preview_nav` / `__fzf_rtfm_fzf_binds_basic`** — Shared keymaps (preview scroll; nav variant leaves Tab/Enter to `--expect`; command picker still uses Tab/Enter accept).
-- **`__fzf_rtfm_fzf_preview_window`** — String for `--preview-window` (`right,80%,wrap`).
+- **`__fzf_rtfm_merged_path_scheme`** — Global array: empty or `( --scheme path )` if fzf supports it.
+- **`__fzf_rtfm_fzf_window_common`** — Shared fzf geometry.
+- **`__fzf_rtfm_fzf_binds_preview` / `_preview_nav` / `_basic`** — Shared keymaps (include **`?`** help bind after load).
+- **`__fzf_rtfm_fzf_preview_window`** — `--preview-window` string (`right,80%,wrap`).
+- **`__fzf_rtfm_print_help` / `__fzf_rtfm_ensure_help_script`** — Help text and pager script for **`?`**.
 
 ### TTY / terminal hygiene
 
-- **`__fzf_is_empty`** — True if `$1` is empty (string test helper).
-- **`__fzf_tty_unfreeze` / `__fzf_tty_refreeze`** — Wrap `ttyctl -u` / `-f` so `fzf` can switch line discipline under zsh’s default frozen TTY.
-- **`__fzf_rtfm_stty_for_fzf` / `__fzf_rtfm_stty_restore`** — Inside **`$(…)`** subshells running `fzf`: save `stty -g`, force sane/cooked mode, restore after `fzf` exits.
-- **`__fzf_rtfm_zle_parent_tty_prepare` / `_restore`** — Same idea on the **parent** shell while a ZLE widget runs (ZLE often leaves the real TTY non-canonical).
-- **`__fzf_rtfm_normalize_query`** — Collapses whitespace on the fzf query string (`awk`).
-- **`__fzf_rtfm_fzf_exec`** — Runs **`fzf`** or **`fzf-tmux`** depending on env (`FZF_RTFM_USE_TMUX`, `TMUX_PANE`).
+- **`__fzf_tty_unfreeze` / `__fzf_tty_refreeze`** — `ttyctl -u` / `-f`.
+- **`__fzf_rtfm_drain_tty_input`** — Drop pending keystrokes before the next fzf (avoids instant accept after Tab).
+- **`__fzf_rtfm_stty_for_fzf` / `__fzf_rtfm_stty_restore`** — Cooked TTY inside `$(…)` fzf subshells.
+- **`__fzf_rtfm_zle_parent_tty_prepare` / `_restore`** — Same on the parent shell during ZLE.
+- **`__fzf_rtfm_normalize_query`** — Collapse whitespace on the query string.
+- **`__fzf_rtfm_fzf_exec`** — `fzf` or `fzf-tmux` depending on env.
 
 ### Resolution / docs ingest
 
-- **`__fzf_resolve_binary`** — `command -v` check; prints resolved path or errors to stderr.
+- **`__fzf_resolve_binary`** — `command -v` check.
 - **`__fzf_man_topic_exists`** — `man -w` probe.
-- **`__fzf_get_help_text`** — Runs `binary --help` / `-h` (and `sv` stderr hack); requires a `usage:`-ish line (`rg`); returns text or status `2`.
-- **`__fzf_compact_ws`** — Normalizes whitespace in a description string.
+- **`__fzf_get_help_text`** — `binary --help` / `-h` (with `usage:`-ish detection).
+- **`__fzf_compact_ws`** — Normalize description whitespace.
+- **`__fzf_rtfm_text_wants_files`** — Detect whether usage suggests path args.
 
 ### Parsing (generic)
 
-- **`__fzf_parse_dash_options_block`** — Reads stdin or `$1`; **awk** state machine that turns man/help-like text into **`token<TAB>description`** (handles continuations, placeholder args `<foo>`).
-- **`__fzf_parse_man_subcommands`** — `man -k "^$cmd-"` → short subcommand names + descriptions (`git`-style pages).
+- **`__fzf_parse_dash_options_block`** — man/help → `token<TAB>description`.
+- **`__fzf_parse_man_subcommands`** — `man -k "^$cmd-"` → subcommand names.
 
-### Docker
+### Docker / `ip` / `sv`
 
-- **`__fzf_docker_root_entries`** — Parses **`docker --help`**: command sections + global options.
-- **`__fzf_docker_sub_options`** — Parses **`docker $sub --help`** option tables.
+- **Docker:** `__fzf_docker_root_entries`, `__fzf_docker_sub_options`
+- **ip:** `__fzf_ip_root_entries`, `__fzf_ip_submanual_entries`, plus synopsis/OPTIONS helpers
+- **sv:** `__fzf_sv_entries`, `__fzf_sv_should_offer_services`, `__fzf_sv_service_entries` (`$SVDIR`)
 
-### `ip` (iproute2)
+### Entry builder
 
-- **`__fzf_ip_man_colb`** — `man $topic | col -b`.
-- **`__fzf_ip_synopsis_object_names`** — Pulls **`OBJECT := { … }`** from main `ip` manpage.
-- **`__fzf_ip_canonical_object`** — Maps user token to best OBJECT name (exact / shortest prefix).
-- **`__fzf_ip_resolve_man_topic`** — Maps OBJECT → **`ip-<object>`** page name with neighbor/neighbour etc. aliases.
-- **`__fzf_ip_extract_options_section`** — **Awk** slice: from **`OPTIONS`** until known section headers (stops on SEE ALSO, `IP LINK`, …).
-- **`__fzf_ip_object_blurbs_from_syntax`** — Optional descriptions from **`IP - COMMAND SYNTAX`** block.
-- **`__fzf_ip_root_entries`** — Merges OBJECT list + blurbs + global OPTIONS parsed options.
-- **`__fzf_ip_extract_synopsis_verbs`** — Verbs inside `{ a | b }` groups in SYNOPSIS (per-object pages).
-- **`__fzf_ip_submanual_entries`** — For one OBJECT: verbs + OPTIONS from **`ip-<object>`**.
+- **`__fzf_build_entries`** — Router for `ip` / `sv` / `docker` / generic man+help. Optional full line for `sv` services.
 
-### `sv` (runit)
+### Diagnostics (public)
 
-- **`__fzf_sv_runit_command_rows`** — Here-doc of standard **sv** verbs (static reference).
-- **`__fzf_sv_usage_line`** — Extract usage line from `man sv` or first stderr line.
-- **`__fzf_sv_entries`** — Merges OPTIONS from man + `sv --help` / `-h` + synthetic `-v`/`-w` hints + verb table.
-- **`__fzf_sv_is_verb`** — Case match on runit verbs.
-- **`__fzf_sv_should_offer_services`** — Zsh **`${(z)…}`** word splitting on full line: after options, sees verb → services mode.
-- **`__fzf_sv_service_entries`** — Lists service names under `$SVDIR` or `/var/service`.
+- **`fzf_diagnose_cmd`** / **`__fzf_diagnose_cmd`** — Man/help/parse dump for a command.
+- **`fzf_rtfm_diagnose`** — Environment / TTY / fzf dump.
 
-### Command line understanding (ZLE)
+### Tab / path / picker layer
 
-- **`__fzf_get_cmd_and_sub`** — From **`LBUFFER`**: strips optional **`sudo`**, **`builtin`/`command` chains**; outputs **`cmd<TAB>sub`** where `sub` is first non-option word after `cmd`.
+- **`__fzf_zle_token_state`** — Globals `prefix_rest`, `lastw`, `nwords` from `LBUFFER`.
+- **`__fzf_apply_pick` / `__fzf_apply_dir_pick` / `__fzf_apply_mixed_pick`** — Insert tokens onto the line.
+- **`__fzf_rtfm_path_only` / `__fzf_rtfm_is_dir_prefix` / `__fzf_rtfm_dir_has_entries`** — Path-token gating.
+- **`__fzf_tab_immediate_file_rows`** — Depth-1 file/dir rows (hidden flag, `/` special case).
+- **`__fzf_pick_mixed`** — Mixed man+path fzf (Tab/Enter expect, Alt-., Ctrl-f filter, `?` help).
+- **`__fzf_rtfm_browse_apply`** — ZLE loop: Tab stays open after insert; Enter returns to the shell; dir zoom.
+- **`__fzf_tab_try_command` / `__fzf_tab_try_rtfm` / `__fzf_tab_try_path_firstword`** — Tab phases.
+- **`fzf_tab_unified_impl`** — Widget: command → options/args (auto-chain); no stock-completion fallback.
+- **`fzf_rtfm_rebind_tab`** — Rebind `^I` after `compinit` / `fzf --zsh`.
 
-### Entry builder (dispatches by `cmd`)
-
-- **`__fzf_build_entries`** — Central router: **`ip`**, **`sv`**, **`docker`**, else generic **man / help** pipeline. Optional **`$3`** full line for **`sv`** service detection. Returns lines on stdout; **`2`** means “no docs” for widget to swallow quietly.
-
-### Diagnostics (user-facing)
-
-- **`__fzf_diagnose_cmd`** — Prints man, `man -k`, help samples, parse counts for a named binary.
-- **`fzf_diagnose_cmd`** — Public thin wrapper.
-- **`fzf_rtfm_diagnose`** — Environment dump: zsh/fzf/tty/`FZF_DEFAULT_OPTS` warnings.
-
-### RTFM picker (options / subcommands)
-
-- **`__fzf_pick`** — Spawns **fzf** with shared window + preview of second column; **trap** + **`__fzf_pick__fin`** restore parent TTY and ttyctl.
-
-### Tab / path / history widget layer
-
-- **`__fzf_zle_token_state`** — Sets globals **`prefix_rest`**, **`lastw`**, **`nwords`** from **`LBUFFER`** (handles trailing space = new empty token).
-- **`__fzf_apply_pick`** — Replaces last token: **`prefix_rest picked␠`**.
-- **`__fzf_tab_finish_fzf_pick`** — Normalizes fzf/rc: **`2`** → redisplay only; failure → return; else calls apply hook with picked string.
-- **`__fzf_tab_path_token_dir_base`** — Derives **`dir`** + **`base`** from **`lastw`** / optional path fragment; expands leading `~`.
-- **`__fzf_tab_apply_merged_hist_path_pick`** — Decodes **`h<TAB>…`** vs **`p<TAB>…`** rows from merged list.
-- **`__fzf_last_word_is_pathlike`** — Heuristic: `/*`, `./`, `../`, `~*`, `*/*`.
-- **`__fzf_rtfm_list_depth`** — Always `1` (one-level listings).
-- **`__fzf_rtfm_is_dir_prefix`** — True when **`lastw`** is a directory path (`src/`, `/`, existing dir).
-- **`__fzf_rtfm_dir_has_entries`** — True if a directory has children the picker would show.
-- **`__fzf_tab_immediate_file_rows`** — Files/dirs under a listing root (`mode` all or dirs; depth and hidden flag).
-- **`__fzf_expect_path_arg`** — Previous word is a “path verb” (`cp`, `mv`, …) but not `cd`/`pushd`.
-- **`__fzf_tab_is_command_position`** — Empty line or sole **`sudo`** prefix.
-- **`__fzf_tab_first_cmd_word_after_modifiers`** — Walks **`builtin`/`command`**; sets **`REPLY`** to real command word.
-- **`__fzf_tab_is_source_or_dot_arg` / `_cd_or_pushd_arg`** — Predicate wrappers on **`REPLY`**.
-
-### History
-
-- **`__fzf_hist_shell_verb_lines`** — **`fc`** back-end, **`awk`** filter for `source`/. or cd/pushd (+ sudo/builtin forms), dedupe.
-- **`__fzf_hist_source_dot_lines` / `_cd_pushd_lines`** — Mode wrappers.
-- **`__fzf_apply_source_hist_pick`** — Rebuilds line with picked **history line** as new argument.
-
-### Candidate files + merged fzf
-
-- **`__fzf_tab_build_source_arg_candidate_file`** — Writes **`h`/`p`** TSV file: history + filesystem files.
-- **`__fzf_tab_build_cd_arg_candidate_file`** — Same with dirs only + optional **`/`** toplevel when **`dir==.`**; awk dedupe.
-- **`__fzf_tab_pick_hist_path_merged`** — Builds temp **sh** preview helper; **trap** + **`__fzf_hpmerged_fin`** removes it and restores TTY; runs **fzf** with **`--nth=1,2`** and path scheme.
-- **`__fzf_tab_pick_source_arg`** — Calls merged picker with **`src+path>`** prompt.
-- **`__fzf_tab_try_source_arg` / `_try_cd_arg`** — Orchestrate temp files, merged pick, **`__fzf_tab_finish_fzf_pick`**.
-
-### Command picker
-
-- **`__fzf_path_executable_names`** — Iterates **`commands`** hash; prints executable basenames with real paths.
-- **`__fzf_rtfm_cmd_picker_shell_words`** — Builtin-ish words that are not PATH files but valid first tokens.
-- **`__fzf_hist_first_word_counts`** — **`fc`** → **awk** counts → sort by frequency; feeds scores.
-- **`__fzf_tab_pick_command`** — Merges scores + candidate names; **fzf** with numeric sort; **trap** + **`__fzf_pick_cmd_fin`**.
-- **`__fzf_tab_try_command`** — Runs hist file + picker + apply.
-
-### Plain path picker
-
-- **`__fzf_tab_pick_path`** — **`fd`/`find`** piped to **fzf** with file preview; **trap** + **`__fzf_tab_path_fin`**.
-- **`__fzf_tab_try_path`** — Gate on pathlike / path-verb context; not **`cd`/`pushd`** branch.
-
-### RTFM from tab dispatcher
-
-- **`__fzf_rtfm_browse_apply`** — Mixed path/man picker (ZLE only, not `$(…)`): **Tab** on a non-empty dir shows its immediate children; **Tab** on a file/option/empty-dir inserts and reopens for the next token; **Alt-.** toggles hidden names; **Enter** inserts and returns to the shell; **Esc** leaves the line unchanged.
-- **`__fzf_tab_try_rtfm`** — Parses cmd/sub, **`__fzf_build_entries`**, **`__fzf_rtfm_browse_apply`**.
-
-### Widget entrypoints
-
-- **`fzf_tab_unified_impl`** — Command-name Tab, else man+files mixed picker. Does not fall through to stock completion.
-- **`fzf_rtfm_rebind_tab`** — **`bindkey '^I'`** helper after **`compinit`** / **`fzf --zsh`**; also unbinds Alt-m.
-
-At file bottom, **`zle -N`** registers the Tab widget and **`bindkey '^I'`**. Alt-m is not bound.
+At file bottom, **`zle -N`** registers the Tab widget and **`bindkey '^I'`**.
 
 ---
 

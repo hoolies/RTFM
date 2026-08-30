@@ -51,7 +51,7 @@
 # - Otherwise falls back to `binary --help` / `binary -h`
 # - Special cases:
 #   * ip(8): uses OBJECT list from ip(8) plus options from per-object man pages (ip-<object>)
-#   * sv(8) (runit): OPTIONS + verbs first; after a verb, Alt-m lists services under $SVDIR (/service, /var/service)
+#   * sv(8) (runit): OPTIONS + verbs first; after a verb, services under $SVDIR (/service, /var/service)
 #   * docker: uses docker --help parsing and docker SUB --help parsing
 # - UI:
 #   * Centered floating fzf window with rounded border and margin
@@ -68,6 +68,7 @@
 #       Enter: insert the current pick and return to the shell (does not run the command);
 #              while composing a Ctrl-f regex, Enter runs the filter instead
 #       Esc: abort (or cancel Ctrl-f regex compose / clear active search filter)
+#       ?: show keybindings / usage help (pager; press q to close)
 #
 # Diagnostic (after source):  fzf_diagnose_cmd git   # or __fzf_diagnose_cmd sv
 # If fzf opens but typing does not appear in the query:  fzf_rtfm_diagnose  (paste output when asking for help)
@@ -180,6 +181,99 @@ __fzf_rtfm_fzf_binds_basic=(
 
 # Preview pane layout (token column vs description); shared by RTFM + path merge + bare path pickers.
 typeset -g __fzf_rtfm_fzf_preview_window='right,80%,wrap'
+
+# Help popup (?) — pager script path; created once by __fzf_rtfm_ensure_help_script.
+typeset -g __fzf_rtfm_help_script=
+
+__fzf_rtfm_print_help() {
+  cat <<'EOF'
+RTFM — Read The Fuzzy Manual
+Press q to close this help.
+
+HOW TO USE
+  Tab at the start of a line
+    Complete a command from PATH / builtins. After the command is
+    inserted (cmd ), the options/arguments picker opens.
+
+  Tab after a command and a space
+    Open fzf with man/--help options and arguments, plus files/dirs
+    when the command takes paths. A token starting with - is options only.
+
+  Typed directory (src/, /)
+    List directories only (no man options). Tab into a non-empty
+    directory to list its children (depth 1). Empty directory: insert
+    with a trailing space for the next argument (e.g. mv /src /dst).
+
+  cd / pushd
+    -L/-P options, then directories only (no Tcl man cd noise).
+
+  Special: ip, docker, sv (runit services after a verb via $SVDIR).
+
+KEYS INSIDE FZF
+  arrows / Ctrl-j / Ctrl-k   Move selection
+  Left/Right or Ctrl-h/l     Scroll the preview pane
+  Tab                        Non-empty directory: zoom into it (depth 1).
+                             File, option, or empty directory: insert it
+                             and keep the picker open for the next token.
+  Enter                      Insert the current pick and return to the shell
+                             (does not run the command).
+  Esc                        Abort and leave the command line unchanged.
+                             During Ctrl-f: cancel regex typing or clear filter.
+  Alt-.                      Toggle hidden names (dotfiles). On by default.
+                             (fzf cannot bind Ctrl-.)
+  Ctrl-f                     Options/arguments view only: case-sensitive regex
+                             search. Prompt becomes regex> ; type a pattern,
+                             Enter filters the list to all matches. Browse with
+                             arrows or n / N|p. Esc clears the filter.
+  ?                          Show this help (press q to close)
+  type to filter             Fuzzy-filter the left (token) column
+
+PREVIEW
+  Options/arguments: man/--help description
+  Paths: ls -ld plus file contents (directories list children)
+
+NOTES
+  Wrappers (sudo, doas, command, …) are skipped so Tab sees the real command.
+  Enter never runs the command — it only inserts onto the line.
+EOF
+}
+
+__fzf_rtfm_ensure_help_script() {
+  setopt localoptions noshwordsplit
+  if [[ -n "$__fzf_rtfm_help_script" && -x "$__fzf_rtfm_help_script" ]]; then
+    return 0
+  fi
+  __fzf_rtfm_help_script=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-help.XXXXXX") || return 1
+  {
+    print -r '#!/bin/sh'
+    print -r 'print_help() {'
+    print -r 'cat <<'"'"'RTFM_HELP'"'"
+    __fzf_rtfm_print_help
+    print -r 'RTFM_HELP'
+    print -r '}'
+    print -r 'if command -v less >/dev/null 2>&1; then'
+    print -r '  print_help | less -R'
+    print -r 'elif command -v more >/dev/null 2>&1; then'
+    print -r '  print_help | more'
+    print -r 'else'
+    print -r '  print_help'
+    print -r '  printf "\n[press Enter] " > /dev/tty'
+    print -r '  read -r _ < /dev/tty || true'
+    print -r 'fi'
+  } >"$__fzf_rtfm_help_script"
+  command chmod +x "$__fzf_rtfm_help_script"
+}
+
+# Attach ? help to every shared fzf keymap (refresh script each source).
+if [[ -n "$__fzf_rtfm_help_script" ]]; then
+  command rm -f "$__fzf_rtfm_help_script" 2>/dev/null || true
+  __fzf_rtfm_help_script=
+fi
+if __fzf_rtfm_ensure_help_script; then
+  __fzf_rtfm_fzf_binds_preview+=(--bind "?:execute:$__fzf_rtfm_help_script")
+  __fzf_rtfm_fzf_binds_preview_nav+=(--bind "?:execute:$__fzf_rtfm_help_script")
+  __fzf_rtfm_fzf_binds_basic+=(--bind "?:execute:$__fzf_rtfm_help_script")
+fi
 
 # ZLE leaves the *parent* shell TTY non-canonical during widgets; fzf needs the real TTY cooked
 # before its child runs. Subshell-only stty is not always enough — fix parent first, then restore.
