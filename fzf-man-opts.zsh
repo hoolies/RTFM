@@ -30,7 +30,8 @@
 # Tab:
 # - First word with no trailing space (or an empty line): $PATH executables + builtins.
 #   Path-shaped first token (./, ../, /..., ~/): list that directory (not PATH).
-#   Exact prefix match of one name inserts "name ". Several matches: fzf (history then alphabetical).
+#   Exact prefix match of one name inserts "name "; several matches: fzf (history then alphabetical).
+#   After the command is inserted ("cmd "), the options/arguments picker opens in the same Tab.
 # - After a space following the real command: man/--help tokens, then cwd files/dirs when usage
 #   looks like it takes a path. Token starting with "-" is options only.
 # - cd/pushd after a space: zsh -L/-P, "..", then directories only (not Tcl man / man -k ^cd-).
@@ -39,8 +40,8 @@
 #   Tab into a non-empty directory: show that directory’s immediate children (depth 1 again;
 #   files+dirs for path cmds; dirs only for cd/pushd). Empty dir: insert with trailing space.
 #   / stays dirs-only. No .. entries. Alt-. toggles hidden names (fzf cannot bind Ctrl-.).
-#   Tab on a file or man token inserts it. Enter inserts the current pick and leaves you on the line.
-#   Esc leaves the line unchanged.
+#   Tab on a file/option/empty-dir inserts it and keeps the picker open for the next token.
+#   Enter inserts the current pick and returns to the shell prompt. Esc leaves the line unchanged.
 # - Wrappers skipped: sudo doas command builtin env time nice nohup
 # - Special parsers: ip, docker, sv (then files by the same usage rule)
 # - No Alt-m bind. One picker per Tab (directory Tab stays inside that picker).
@@ -59,10 +60,14 @@
 #   * Keymaps:
 #       arrows / Ctrl-J / Ctrl-K to move
 #       Left/Right or Ctrl-H/Ctrl-L to scroll preview up/down
-#       Tab: enter a non-empty directory (depth 1); accept an empty directory with a trailing space
+#       Tab: enter a non-empty directory (depth 1); insert a file/option/empty-dir and stay open
 #       Alt-.: toggle hidden names (dotfiles; fzf cannot bind Ctrl-.)
-#       Enter: accept the current pick and return to the prompt (does not run)
-#       Esc: abort without modifying the command line
+#       Ctrl-f: (options view only) type a case-sensitive regex in the input line (regex> );
+#               Enter filters the list to all matching options/args; n / N|p move among them;
+#               Esc cancels compose or clears the filter (restores the full list)
+#       Enter: insert the current pick and return to the shell (does not run the command);
+#              while composing a Ctrl-f regex, Enter runs the filter instead
+#       Esc: abort (or cancel Ctrl-f regex compose / clear active search filter)
 #
 # Diagnostic (after source):  fzf_diagnose_cmd git   # or __fzf_diagnose_cmd sv
 # If fzf opens but typing does not appear in the query:  fzf_rtfm_diagnose  (paste output when asking for help)
@@ -84,6 +89,15 @@ __fzf_tty_unfreeze() {
 }
 __fzf_tty_refreeze() {
   builtin ttyctl -f 2>/dev/null || true
+}
+
+# Drop pending keystrokes (e.g. Tab/Enter that closed a prior picker) so the next
+# fzf does not immediately accept or abort.
+__fzf_rtfm_drain_tty_input() {
+  local _c
+  while read -k 1 -t 0 _c 2>/dev/null; do
+    :
+  done
 }
 
 # Inside $(...) subshells: line editor often leaves the TTY non-canonical; fzf needs cooked mode for the query line.
@@ -1145,6 +1159,7 @@ __fzf_pick() {
 
   __fzf_tty_unfreeze
   __fzf_rtfm_zle_parent_tty_prepare
+  __fzf_rtfm_drain_tty_input
   selection=$(
     __fzf_rtfm_stty_for_fzf
     printf '%s\n' "$entries" | __fzf_rtfm_fzf_exec \
@@ -1342,6 +1357,7 @@ __fzf_tab_pick_command() {
 
   __fzf_tty_unfreeze
   __fzf_rtfm_zle_parent_tty_prepare
+  __fzf_rtfm_drain_tty_input
   pick=$(
     __fzf_rtfm_stty_for_fzf
     local sc
@@ -1585,6 +1601,7 @@ __fzf_pick_mixed() {
   local man_rows="${8-}"
   local list_mode="${9:-$zoom_mode}"
   local selection fzf_ec=0 ps state lister transformer toggler manfile
+  local entries_file filterfile searchstate searcher search_enter search_next search_prev search_esc promptfile
   local -a qopts=() expect_opts=() bind_opts=()
   local keep_dotslash=0
   [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
@@ -1600,6 +1617,15 @@ __fzf_pick_mixed() {
   transformer=
   toggler=
   manfile=
+  entries_file=
+  filterfile=
+  searchstate=
+  searcher=
+  search_enter=
+  search_next=
+  search_prev=
+  search_esc=
+  promptfile=
   {
     print -r '#!/bin/sh'
     print -r 'line=$1'
@@ -1760,7 +1786,8 @@ __fzf_pick_mixed() {
       print -r 'fi'
       print -r 'if [ -d "$tok" ] && [ "$has_entries" = 1 ]; then'
       print -r '  { printf "%s\n" "$tok"; printf "%s\n" "$hidden"; printf "%s\n" 1; printf "%s\n" 0; printf "%s\n" "$zoom_mode"; } > "$statefile"'
-      print -r '  printf "reload(%s)+clear-query\n" "$lister"'
+      print -r '  if [ -n "$searchstate" ]; then : > "$searchstate"; fi'
+      print -r '  printf "reload(%s)+clear-query+unbind(n)+unbind(N)+unbind(p)+change-header()\n" "$lister"'
       print -r 'else'
       print -r '  printf "accept\n"'
       print -r 'fi'
@@ -1790,6 +1817,179 @@ __fzf_pick_mixed() {
       --bind "tab:transform:$transformer {1}"
       --bind "alt-.:transform:$toggler"
     )
+
+    # Ctrl-f regex search among man options/arguments only.
+    # Type the pattern in fzf's own input line (prompt becomes regex> ) so it is visible.
+    # Enter filters the list to all matches (browse with arrows / n / N|p); does not accept.
+    if [[ -n "$man_rows" ]]; then
+      # Enter is handled by search_enter (filter or accept); keep Tab as --expect only.
+      expect_opts=(--expect=tab)
+      entries_file=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-ent.XXXXXX")
+      filterfile=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-fl.XXXXXX")
+      searchstate=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-sr.XXXXXX")
+      searcher=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-sf.XXXXXX")
+      search_enter=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-se2.XXXXXX")
+      search_next=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-sn.XXXXXX")
+      search_prev=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-sp.XXXXXX")
+      search_esc=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-se.XXXXXX")
+      promptfile=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-pr.XXXXXX")
+      : >"$searchstate"
+      : >"$filterfile"
+      printf '%s\n' "$entries" >"$entries_file"
+      # Prompt bytes for transform-prompt restore (no trailing newline).
+      printf '%s' "$prompt" >"$promptfile"
+      # Patch searchstate path into the already-written transformer.
+      {
+        print -r '#!/bin/sh'
+        print -r "statefile='$state'"
+        print -r "lister='$lister'"
+        print -r "zoom_mode='$zoom_mode'"
+        print -r "searchstate='$searchstate'"
+        print -r "filterfile='$filterfile'"
+        print -r "promptfile='$promptfile'"
+        print -r 'tok=$1'
+        print -r 'hidden=$(sed -n "2p" "$statefile")'
+        print -r 'mode=$(sed -n "5p" "$statefile")'
+        print -r '[ -n "$hidden" ] || hidden=1'
+        print -r '[ -n "$mode" ] || mode=all'
+        print -r '[ -n "$zoom_mode" ] || zoom_mode=all'
+        print -r 'has_entries=0'
+        print -r 'check_mode=$zoom_mode'
+        print -r '[ -n "$check_mode" ] || check_mode=$mode'
+        print -r 'if [ -d "$tok" ]; then'
+        print -r '  if [ "$tok" = / ]; then'
+        print -r '    if [ "$hidden" = 1 ]; then'
+        print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
+        print -r '    else'
+        print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
+        print -r '    fi'
+        print -r '  elif [ "$check_mode" = dirs ]; then'
+        print -r '    if [ "$hidden" = 1 ]; then'
+        print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) 2>/dev/null | head -n 1)'
+        print -r '    else'
+        print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
+        print -r '    fi'
+        print -r '    [ -n "$first" ] && [ -d "$first" ] || first='
+        print -r '  elif [ "$hidden" = 1 ]; then'
+        print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null | head -n 1)'
+        print -r '  else'
+        print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
+        print -r '  fi'
+        print -r '  [ -n "$first" ] && has_entries=1'
+        print -r 'fi'
+        print -r 'if [ -d "$tok" ] && [ "$has_entries" = 1 ]; then'
+        print -r '  { printf "%s\n" "$tok"; printf "%s\n" "$hidden"; printf "%s\n" 1; printf "%s\n" 0; printf "%s\n" "$zoom_mode"; } > "$statefile"'
+        print -r '  : > "$searchstate"'
+        print -r '  : > "$filterfile"'
+        print -r '  printf "reload(%s)+clear-query+enable-search+unbind(n)+unbind(N)+unbind(p)+change-header()+transform-prompt(cat %s)\n" "$lister" "$promptfile"'
+        print -r 'else'
+        print -r '  printf "accept\n"'
+        print -r 'fi'
+      } >"$transformer"
+      command chmod +x "$transformer"
+      # Ctrl-f: enter compose mode — type regex in the visible fzf input line.
+      {
+        print -r '#!/bin/sh'
+        print -r "searchstate='$searchstate'"
+        print -r "statefile='$state'"
+        print -r 'show_man=$(sed -n "4p" "$statefile")'
+        print -r '[ "$show_man" = 1 ] || { printf "ignore\n"; exit 0; }'
+        print -r 'printf "%s\n" __COMPOSE__ > "$searchstate"'
+        print -r 'printf "change-prompt(regex> )+clear-query+disable-search+unbind(tab)+unbind(n)+unbind(N)+unbind(p)+change-header(type regex · Enter filter · Esc cancel)\n"'
+      } >"$searcher"
+      # Enter: filter list to all regex matches while composing; otherwise accept.
+      {
+        print -r '#!/bin/sh'
+        print -r "entries_file='$entries_file'"
+        print -r "filterfile='$filterfile'"
+        print -r "searchstate='$searchstate'"
+        print -r "promptfile='$promptfile'"
+        print -r 'mode=$(sed -n "1p" "$searchstate")'
+        print -r 'if [ "$mode" != "__COMPOSE__" ]; then'
+        print -r '  printf "accept\n"'
+        print -r '  exit 0'
+        print -r 'fi'
+        print -r 'pat=$FZF_QUERY'
+        print -r 'if [ -z "$pat" ]; then'
+        print -r '  printf "change-header(type regex · Enter filter · Esc cancel)\n"'
+        print -r '  exit 0'
+        print -r 'fi'
+        print -r 'if printf "%s\n" x | grep -E -e "$pat" >/dev/null 2>&1; then'
+        print -r '  :'
+        print -r 'else'
+        print -r '  ec=$?'
+        print -r '  if [ "$ec" -eq 2 ]; then'
+        print -r '    printf "change-header(invalid regex · edit and Enter · Esc cancel)\n"'
+        print -r '    exit 0'
+        print -r '  fi'
+        print -r 'fi'
+        print -r ': > "$filterfile"'
+        print -r 'nmatch=0'
+        print -r 'while IFS= read -r line || [ -n "$line" ]; do'
+        print -r '  kind=$(printf %s "$line" | cut -f2)'
+        print -r '  [ "$kind" = m ] || continue'
+        print -r '  tok=$(printf %s "$line" | cut -f1)'
+        print -r '  desc=$(printf %s "$line" | cut -f3-)'
+        print -r '  if printf "%s\n%s\n" "$tok" "$desc" | grep -E -e "$pat" >/dev/null 2>&1; then'
+        print -r '    printf "%s\n" "$line" >> "$filterfile"'
+        print -r '    nmatch=$((nmatch + 1))'
+        print -r '  fi'
+        print -r 'done < "$entries_file"'
+        print -r 'if [ "$nmatch" -eq 0 ]; then'
+        print -r '  : > "$filterfile"'
+        print -r '  printf "change-header(no matches · edit regex · Enter filter · Esc cancel)\n"'
+        print -r '  exit 0'
+        print -r 'fi'
+        print -r 'printf "%s\n" "$pat" > "$searchstate"'
+        print -r 'hdr_pat=$(printf %s "$pat" | tr "()\n\t" "[]  ")'
+        print -r 'printf "transform-prompt(cat %s)+enable-search+clear-query+reload(cat %s)+first+rebind(tab)+rebind(n)+rebind(N)+rebind(p)+change-header(search: %s  %s matches · n/N browse · Esc clear)\n" "$promptfile" "$filterfile" "$hdr_pat" "$nmatch"'
+      } >"$search_enter"
+      {
+        print -r '#!/bin/sh'
+        print -r "searchstate='$searchstate'"
+        print -r 'pat=$(sed -n "1p" "$searchstate")'
+        print -r '[ -n "$pat" ] || { printf "ignore\n"; exit 0; }'
+        print -r '[ "$pat" = "__COMPOSE__" ] && { printf "ignore\n"; exit 0; }'
+        print -r 'printf "down\n"'
+      } >"$search_next"
+      {
+        print -r '#!/bin/sh'
+        print -r "searchstate='$searchstate'"
+        print -r 'pat=$(sed -n "1p" "$searchstate")'
+        print -r '[ -n "$pat" ] || { printf "ignore\n"; exit 0; }'
+        print -r '[ "$pat" = "__COMPOSE__" ] && { printf "ignore\n"; exit 0; }'
+        print -r 'printf "up\n"'
+      } >"$search_prev"
+      {
+        print -r '#!/bin/sh'
+        print -r "searchstate='$searchstate'"
+        print -r "promptfile='$promptfile'"
+        print -r "entries_file='$entries_file'"
+        print -r "filterfile='$filterfile'"
+        print -r "lister='$lister'"
+        print -r 'pat=$(sed -n "1p" "$searchstate")'
+        print -r 'if [ "$pat" = "__COMPOSE__" ]; then'
+        print -r '  : > "$searchstate"'
+        print -r '  printf "transform-prompt(cat %s)+enable-search+clear-query+rebind(tab)+change-header()\n" "$promptfile"'
+        print -r 'elif [ -n "$pat" ]; then'
+        print -r '  : > "$searchstate"'
+        print -r '  : > "$filterfile"'
+        print -r '  printf "reload(%s)+clear-query+unbind(n)+unbind(N)+unbind(p)+change-header()\n" "$lister"'
+        print -r 'else'
+        print -r '  printf "abort\n"'
+        print -r 'fi'
+      } >"$search_esc"
+      command chmod +x "$searcher" "$search_enter" "$search_next" "$search_prev" "$search_esc"
+      bind_opts+=(
+        --bind "start:unbind(n,N,p)"
+        --bind "ctrl-f:transform:$searcher"
+        --bind "enter:transform:$search_enter"
+        --bind "n:transform:$search_next"
+        --bind "N:transform:$search_prev"
+        --bind "p:transform:$search_prev"
+        --bind "esc:transform:$search_esc"
+      )
+    fi
   else
     bind_opts=("${__fzf_rtfm_fzf_binds_preview[@]}")
   fi
@@ -1798,7 +1998,9 @@ __fzf_pick_mixed() {
   __fzf_mixed_fin() {
     ((__fzf_mixed_done)) && return 0
     __fzf_mixed_done=1
-    command rm -f "$ps" "$state" "$lister" "$transformer" "$toggler" "$manfile"
+    command rm -f "$ps" "$state" "$lister" "$transformer" "$toggler" "$manfile" \
+      "$entries_file" "$filterfile" "$searchstate" "$searcher" "$search_enter" \
+      "$search_next" "$search_prev" "$search_esc" "$promptfile"
     __fzf_rtfm_zle_parent_tty_restore
     __fzf_tty_refreeze
   }
@@ -1806,6 +2008,7 @@ __fzf_pick_mixed() {
 
   __fzf_tty_unfreeze
   __fzf_rtfm_zle_parent_tty_prepare
+  __fzf_rtfm_drain_tty_input
   selection=$(
     __fzf_rtfm_stty_for_fzf
     printf '%s\n' "$entries" | __fzf_rtfm_fzf_exec \
@@ -1872,13 +2075,13 @@ __fzf_apply_mixed_pick() {
 }
 
 # ZLE-only (do not call from $(...)): listings are always depth 1. Tab on a
-# non-empty dir shows that directory’s immediate children; Tab on an empty dir
-# inserts it with a trailing space (next arg, e.g. mv /src /dst). Alt-. toggles
-# hidden names. Tab on a file/option inserts; Enter inserts and returns to the
-# prompt; Esc leaves the line as-is.
+# non-empty dir shows that directory’s immediate children; Tab on a file, option,
+# or empty dir inserts it and reopens the picker for the next token. Enter inserts
+# and returns to the shell. Alt-. toggles hidden names. Esc leaves the line as-is.
 __fzf_rtfm_browse_apply() {
   setopt localoptions noshwordsplit
   local man_rows="$1" file_rows="$2" prompt="$3" q="$4" mode="$5"
+  local orig_man_rows="$man_rows"
   local use_man=1
   local mixed raw rc key row kind tok
   local show_prompt="$prompt"
@@ -1944,15 +2147,44 @@ __fzf_rtfm_browse_apply() {
           continue
         fi
       fi
-      # Empty directory (Tab/Enter/accept): insert with a trailing space for the next arg.
-      if ! __fzf_rtfm_dir_has_entries "$tok" "$mode" 1; then
-        __fzf_apply_pick "${tok%/}/"
-        return 0
-      fi
     fi
 
-    __fzf_apply_mixed_pick "$row"
-    return 0
+    # Enter (or plain accept): insert and return to the shell.
+    if [[ "$key" != tab ]]; then
+      if [[ "$kind" == f && -n "$tok" && -d "$tok" ]] && ! __fzf_rtfm_dir_has_entries "$tok" "$mode" 1; then
+        __fzf_apply_pick "${tok%/}/"
+      else
+        __fzf_apply_mixed_pick "$row"
+      fi
+      return 0
+    fi
+
+    # Tab: insert the pick, then reopen the picker for the next token.
+    if [[ "$kind" == f && -n "$tok" && -d "$tok" ]] && ! __fzf_rtfm_dir_has_entries "$tok" "$mode" 1; then
+      __fzf_apply_pick "${tok%/}/"
+    else
+      __fzf_apply_mixed_pick "$row"
+    fi
+    __fzf_zle_token_state
+    q=""
+    show_prompt="$prompt"
+    list_dir='.'
+    list_depth=1
+    list_mode="$mode"
+    man_rows="$orig_man_rows"
+    use_man=1
+    if __fzf_rtfm_path_only; then
+      use_man=0
+      man_rows=""
+    fi
+    [[ -z "$orig_man_rows" ]] && use_man=0
+    if __fzf_rtfm_is_dir_prefix; then
+      list_mode=dirs
+    fi
+    __fzf_tab_path_token_dir_base
+    list_dir="$dir"
+    file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" "$list_mode" 1 1)"
+    continue
   done
 }
 
@@ -2049,6 +2281,13 @@ fzf_tab_unified_impl() {
     return 0
   fi
   if __fzf_tab_try_command; then
+    # Command inserted as "cmd ": refresh tokens and open options/arguments next.
+    __fzf_zle_token_state
+    if ! __fzf_tab_completing_command_name; then
+      __fzf_tab_try_rtfm || zle redisplay
+    else
+      zle redisplay
+    fi
     return 0
   fi
   if __fzf_tab_try_rtfm; then

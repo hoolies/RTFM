@@ -6,8 +6,8 @@ A **zsh** plugin that binds **Tab (`^I`)** to a two-phase widget: complete the c
 
 ## What it does (short)
 
-- **First word, no space yet:** Tab completes **PATH executables and shell builtins**. One prefix match is inserted with a space; several matches open **fzf** (history frequency, then alphabetical). An empty line opens the full command list.
-- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path (cwd lists also include **`/`**). A token starting with `-` is options only. Typing a directory (`src/`, `/`) lists **directories only at depth 1** and hides man options/arguments. **Tab** on a non-empty directory shows that directory’s immediate children (depth 1 again; files+dirs for path commands; dirs only for `cd`/`pushd`). Empty directory: insert with a trailing space. Parent `..` entries are not listed. **Alt-.** toggles hidden names (shown by default; fzf cannot bind Ctrl-.); **Enter** inserts the pick and returns to the prompt; **Esc** aborts.
+- **First word, no space yet:** Tab completes **PATH executables and shell builtins**. One prefix match is inserted with a space; several matches open **fzf** (history frequency, then alphabetical). An empty line opens the full command list. After the command is inserted (`cmd `), Tab continues into the **options/arguments** picker in the same gesture (no second Tab).
+- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path (cwd lists also include **`/`**). A token starting with `-` is options only. Typing a directory (`src/`, `/`) lists **directories only at depth 1** and hides man options/arguments. **Tab** on a non-empty directory shows that directory’s immediate children (depth 1 again; files+dirs for path commands; dirs only for `cd`/`pushd`). **Tab** on a file, option, or empty directory inserts it and keeps the picker open. Parent `..` entries are not listed. **Alt-.** toggles hidden names (shown by default; fzf cannot bind Ctrl-.); **Enter** inserts the pick and returns to the shell; **Esc** aborts.
 - Wrappers (`sudo`, `doas`, `command`, `builtin`, `env`, `time`, `nice`, `nohup`) are skipped so Tab sees the real command.
 - Special parsers: **`ip`**, **`docker`**, **`sv`** (runit).
 
@@ -63,17 +63,18 @@ fzf_rtfm_rebind_tab
 
 ## Keys and `fzf` UI
 
-- **Tab (`^I`)** — first word (no trailing space): `$PATH` + builtins (`gi<Tab>` unique insert, else fzf). After a space: man/--help tokens, then cwd files/dirs (one level) when usage looks like it takes a path. `-` tokens are options only. A typed directory (`src/`, `/`) lists directories only at depth 1; Tab steps one level into a directory or selects a file.
+- **Tab (`^I`)** — first word (no trailing space): `$PATH` + builtins (`gi<Tab>` unique insert, else fzf), then the options/arguments picker opens automatically. After a space: man/--help tokens, then cwd files/dirs (one level) when usage looks like it takes a path. `-` tokens are options only. A typed directory (`src/`, `/`) lists directories only at depth 1; Tab steps one level into a directory or selects a file.
 - **Alt-m** — not bound (Tab only)
 
 Inside **fzf**:
 
 - Move: arrows, **Ctrl-j** / **Ctrl-k**
 - Scroll preview: **Left/Right** or **Ctrl-h** / **Ctrl-l**
-- **Tab** — non-empty directory: show that directory’s immediate children (depth 1). Empty directory: insert it with a trailing space (ready for the next arg, e.g. `mv /src /dst`). File or man token: insert and return to the prompt
+- **Tab** — non-empty directory: show that directory’s immediate children (depth 1). File, option, or empty directory: insert it (with a trailing space) and **keep the picker open** for the next token
 - **Alt-.** — toggle hidden names (dotfiles); on by default. fzf cannot bind Ctrl-.
-- **Enter** — insert the current pick and return to the prompt (does not run the command)
-- **Esc** — abort without changing the command line
+- **Ctrl-f** — (options/arguments view only) case-sensitive **regex** search over option tokens and descriptions. The prompt becomes `regex> ` so you can see what you type; press **Enter** to **filter** the list to all matches (browse with arrows or **n** / **N**|**p**). **Esc** cancels typing or clears the filter (or aborts the picker if neither).
+- **Enter** — insert the current pick and **return to the shell** (does not run the command). While typing a Ctrl-f regex, Enter runs the filter instead.
+- **Esc** — abort without changing the command line (or clear Ctrl-f search when active)
 
 Preview column shows man descriptions, or for paths: `ls -ld` plus file contents (directories list their children). **Ctrl-h** / **Ctrl-l** (and Left/Right) scroll the preview. Fuzzy search targets the **token** column.
 
@@ -257,7 +258,7 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 
 ### RTFM from tab dispatcher
 
-- **`__fzf_rtfm_browse_apply`** — Mixed path/man picker (ZLE only, not `$(…)`): **Tab** on a non-empty dir shows its immediate children; empty dir inserts with a trailing space; **Alt-.** toggles hidden names; **Tab** on a file/option inserts; **Enter** inserts and returns to the prompt; **Esc** leaves the line unchanged.
+- **`__fzf_rtfm_browse_apply`** — Mixed path/man picker (ZLE only, not `$(…)`): **Tab** on a non-empty dir shows its immediate children; **Tab** on a file/option/empty-dir inserts and reopens for the next token; **Alt-.** toggles hidden names; **Enter** inserts and returns to the shell; **Esc** leaves the line unchanged.
 - **`__fzf_tab_try_rtfm`** — Parses cmd/sub, **`__fzf_build_entries`**, **`__fzf_rtfm_browse_apply`**.
 
 ### Widget entrypoints
