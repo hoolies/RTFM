@@ -57,7 +57,7 @@ Available when man options/arguments are shown (not in path-only browse).
 1. **Ctrl-f** — prompt becomes `regex> ` (typed text is visible; fuzzy filtering pauses)
 2. Type a **case-sensitive regex** over option tokens and descriptions
 3. **Enter** — **filter** the list to all matches (does not insert)
-4. Browse with **arrows** or **n** (next) / **N** or **p** (previous)
+4. Browse with **arrows** or **n** / **N**|**p** (move selection in the filtered list). Typing further fuzzy-refines the filtered set.
 5. **Tab** / **Enter** — insert as usual; **Esc** — cancel typing or clear the filter
 
 ### In-picker help
@@ -104,7 +104,7 @@ These prefixes are skipped so Tab sees the real command:
 - **fzf** on `PATH`
 - **rg** (ripgrep) — small filters (`usage:` detection, feature probes)
 - **man** + **col** — manpage text
-- Optional: **less** or **more** (help popup), **fd**, **fzf-tmux**, **timeout**, GNU/BSD **find**
+- Optional: **less** or **more** (help popup), **fzf-tmux**, **timeout**, GNU/BSD **find**
 
 ---
 
@@ -176,8 +176,8 @@ fzf_rtfm_rebind_tab
 |----------|---------|
 | `FZF_RTFM_USE_TMUX` | Non-zero + valid `TMUX_PANE` → use `fzf-tmux` (helps some tmux setups where typing fails) |
 | `FZF_RTFM_TMUX_OPTS` | Extra args for `fzf-tmux` (zsh word-split via `${=…}`); default `-d 90%` |
-| `FZF_RTFM_HIST_DEPTH` | Max `fc` lines for history-based ranking (default `4000`) |
-| `FZF_RTFM_NO_PATH_SCHEME` | Set to `1` to omit `--scheme path` for very old fzf |
+| `FZF_RTFM_HIST_DEPTH` | Max `fc` lines for **command-picker** history frequency ranking (default `4000`) |
+| `FZF_RTFM_NO_PATH_SCHEME` | Set to `1` to omit `--scheme path` on path/mixed pickers (for very old fzf) |
 | `SVDIR` | Runit service directory for `sv` (default `/service`, fallback `/var/service`) |
 
 You can override **`typeset -ga __fzf_rtfm_fzf_window_common`** and the shared bind arrays **after** sourcing to tweak all pickers at once.
@@ -251,11 +251,14 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 
 ### Load-time configuration
 
-- **`__fzf_rtfm_merged_path_scheme`** — Global array: empty or `( --scheme path )` if fzf supports it.
+- **`__fzf_rtfm_merged_path_scheme`** — Global array: empty or `( --scheme path )` if fzf supports it; passed to mixed path pickers.
 - **`__fzf_rtfm_fzf_window_common`** — Shared fzf geometry.
 - **`__fzf_rtfm_fzf_binds_preview` / `_preview_nav` / `_basic`** — Shared keymaps (include **`?`** help bind after load).
 - **`__fzf_rtfm_fzf_preview_window`** — `--preview-window` string (`right,80%,wrap`).
 - **`__fzf_rtfm_print_help` / `__fzf_rtfm_ensure_help_script`** — Help text and pager script for **`?`**.
+- **`__fzf_rtfm_ensure_preview_script` / `__fzf_rtfm_write_lister` / `_write_transformer` / `_write_toggler`** — Cached preview + shared in-fzf script generators.
+- **`__fzf_rtfm_resolve_path_pick`** — Join picks onto a typed directory prefix in `lastw`.
+- **`__fzf_rtfm_man_options_from_topic`** — OPTIONS-section-first man parse.
 
 ### TTY / terminal hygiene
 
@@ -312,4 +315,9 @@ At file bottom, **`zle -N`** registers the Tab widget and **`bindkey '^I'`**.
 
 ## Contributing
 
-Issues and PRs welcome. Please run **`zsh -n fzf-man-opts.zsh`** before submitting changes.
+Issues and PRs welcome. Before submitting changes:
+
+```bash
+zsh -n fzf-man-opts.zsh
+zsh tests/rtfm-unit.zsh
+```

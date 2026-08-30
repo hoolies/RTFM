@@ -34,7 +34,7 @@
 #   After the command is inserted ("cmd "), the options/arguments picker opens in the same Tab.
 # - After a space following the real command: man/--help tokens, then cwd files/dirs when usage
 #   looks like it takes a path. Token starting with "-" is options only.
-# - cd/pushd after a space: zsh -L/-P, "..", then directories only (not Tcl man / man -k ^cd-).
+# - cd/pushd after a space: zsh -L/-P, then directories only (not Tcl man / man -k ^cd-). No .. entries.
 # - Cwd with no directory prefix: one-level files/dirs (plus /) mixed with man options.
 #   Typed directory (src/, /): paths only (no man options/args), directories only at depth 1.
 #   Tab into a non-empty directory: show that directory’s immediate children (depth 1 again;
@@ -45,10 +45,9 @@
 # - Wrappers skipped: sudo doas command builtin env time nice nohup
 # - Special parsers: ip, docker, sv (then files by the same usage rule)
 # - No Alt-m bind. One picker per Tab (directory Tab stays inside that picker).
-# - Uses man pages (and sub-man pages like git-status) when available, else --help / -h
-# - UI: left token, right description (man text, or size+permissions for files)
-# - Uses man pages (and sub-man pages like `git-commit`) when available
+# - Uses man pages (and sub-man pages like git-status / git-commit) when available
 # - Otherwise falls back to `binary --help` / `binary -h`
+# - UI: left token, right description (man text, or size+permissions for files)
 # - Special cases:
 #   * ip(8): uses OBJECT list from ip(8) plus options from per-object man pages (ip-<object>)
 #   * sv(8) (runit): OPTIONS + verbs first; after a verb, services under $SVDIR (/service, /var/service)
@@ -78,7 +77,7 @@
 #
 # In tmux, if typing in fzf still fails:  export FZF_RTFM_USE_TMUX=1  (uses fzf-tmux -d 90%)
 #
-# Optional env: FZF_RTFM_HIST_DEPTH (default 4000) caps fc lines for source/cd history merge and first-token command-picker stats;
+# Optional env: FZF_RTFM_HIST_DEPTH (default 4000) caps fc lines for first-token command-picker history stats;
 #               FZF_RTFM_NO_PATH_SCHEME=1 disables --scheme path for very old fzf.
 
 # ---------- Basic helpers ----------
@@ -122,17 +121,30 @@ __fzf_rtfm_normalize_query() {
   print -r -- "$1" | command awk '{gsub(/^[[:space:]]+|[[:space:]]+$/,""); gsub(/[[:space:]]+/," "); print}'
 }
 
+# Prefer POSIX sh for fzf child processes. With SHELL=zsh, preview/transform
+# run via `zsh -c` and man text with quotes ('always', 'table') dumps as a
+# parse error above the picker — especially on the second Tab.
+typeset -ga __fzf_rtfm_with_shell
+__fzf_rtfm_with_shell=()
+if command fzf --help 2>/dev/null | command rg -q -- '--with-shell' 2>/dev/null; then
+  if [[ -x /bin/sh ]]; then
+    __fzf_rtfm_with_shell=(--with-shell='/bin/sh -c')
+  elif command -v sh >/dev/null 2>&1; then
+    __fzf_rtfm_with_shell=(--with-shell='sh -c')
+  fi
+fi
+
 __fzf_rtfm_fzf_exec() {
   if [[ ${FZF_RTFM_USE_TMUX-0} != 0 ]] && [[ -n ${TMUX_PANE-} ]] && command -v fzf-tmux >/dev/null 2>&1; then
     if [[ -n ${FZF_RTFM_TMUX_OPTS-} ]]; then
       # zsh ${=var}: word-split into argv for fzf-tmux; quoted form would pass a single token
       # shellcheck disable=SC2086
-      command fzf-tmux ${=FZF_RTFM_TMUX_OPTS} -- "$@"
+      command fzf-tmux ${=FZF_RTFM_TMUX_OPTS} -- "${__fzf_rtfm_with_shell[@]}" "$@"
     else
-      command fzf-tmux -d 90% -- "$@"
+      command fzf-tmux -d 90% -- "${__fzf_rtfm_with_shell[@]}" "$@"
     fi
   else
-    command fzf "$@"
+    command fzf "${__fzf_rtfm_with_shell[@]}" "$@"
   fi
 }
 
@@ -146,7 +158,7 @@ else
   __fzf_rtfm_merged_path_scheme=()
 fi
 
-# Shared fzf UI fragments (geometry + keymaps) — keep Tab/Alt-m and RTFM pickers visually consistent.
+# Shared fzf UI fragments (geometry + keymaps) — keep Tab and RTFM pickers visually consistent.
 typeset -ga __fzf_rtfm_fzf_window_common
 __fzf_rtfm_fzf_window_common=(
   --height=90%
@@ -223,10 +235,12 @@ KEYS INSIDE FZF
                              (fzf cannot bind Ctrl-.)
   Ctrl-f                     Options/arguments view only: case-sensitive regex
                              search. Prompt becomes regex> ; type a pattern,
-                             Enter filters the list to all matches. Browse with
-                             arrows or n / N|p. Esc clears the filter.
+                             Enter filters the list to all matches. Then arrows
+                             or n / N|p move the selection; typing further
+                             fuzzy-refines the filtered list. Esc clears filter.
   ?                          Show this help (press q to close)
   type to filter             Fuzzy-filter the left (token) column
+                             (also works after a Ctrl-f filter to refine)
 
 PREVIEW
   Options/arguments: man/--help description
@@ -275,6 +289,227 @@ if __fzf_rtfm_ensure_help_script; then
   __fzf_rtfm_fzf_binds_basic+=(--bind "?:execute:$__fzf_rtfm_help_script")
 fi
 
+# Cached preview script for mixed path/man picker (refreshed each source).
+typeset -g __fzf_rtfm_preview_script=
+__fzf_rtfm_ensure_preview_script() {
+  setopt localoptions noshwordsplit
+  if [[ -n "$__fzf_rtfm_preview_script" && -x "$__fzf_rtfm_preview_script" ]]; then
+    return 0
+  fi
+  __fzf_rtfm_preview_script=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-prev-c.XXXXXX") || return 1
+  {
+    print -r '#!/bin/sh'
+    # Args: token, kind (m|f), optional desc-file (tok<TAB>m<TAB>desc).
+    # Do not pass the full fzf line through $SHELL -c: docker/man text
+    # contains quotes (Don't, 'table') that break zsh -c.
+    print -r 'tok=$1'
+    print -r 'kind=$2'
+    print -r 'descfile=$3'
+    print -r 'if [ "$kind" != f ]; then'
+    print -r '  if [ -n "$descfile" ] && [ -f "$descfile" ]; then'
+    print -r '    awk -F "\t" -v t="$tok" '\''$1==t { print $3; found=1 } END { exit !found }'\'' "$descfile" 2>/dev/null && exit 0'
+    print -r '  fi'
+    print -r '  exit 0'
+    print -r 'fi'
+    print -r 'ls -ld -- "$tok" 2>/dev/null'
+    print -r 'if [ -d "$tok" ]; then'
+    print -r '  printf "\n"'
+    print -r '  ls -la -- "$tok" 2>/dev/null | head -n 80'
+    print -r '  exit 0'
+    print -r 'fi'
+    print -r 'if [ ! -e "$tok" ] && [ ! -L "$tok" ]; then'
+    print -r '  exit 0'
+    print -r 'fi'
+    print -r 'printf "\n"'
+    print -r 'mime='
+    print -r 'if command -v file >/dev/null 2>&1; then'
+    print -r '  mime=$(file -b --mime-type -- "$tok" 2>/dev/null || true)'
+    print -r 'fi'
+    print -r 'case "$mime" in'
+    print -r '  ""|text/*|*empty*|inode/x-empty|application/json|application/xml|application/javascript|application/x-sh|application/x-shellscript|application/x-csh|application/toml|application/yaml|application/x-yaml|application/sql)'
+    print -r '    head -n 500 -- "$tok" 2>/dev/null'
+    print -r '    ;;'
+    print -r '  *)'
+    print -r '    if command -v file >/dev/null 2>&1; then'
+    print -r '      file -- "$tok" 2>/dev/null'
+    print -r '    else'
+    print -r '      printf "(binary or non-text file)\n"'
+    print -r '    fi'
+    print -r '    ;;'
+    print -r 'esac'
+  } >"$__fzf_rtfm_preview_script"
+  command chmod +x "$__fzf_rtfm_preview_script"
+}
+if [[ -n "$__fzf_rtfm_preview_script" ]]; then
+  command rm -f "$__fzf_rtfm_preview_script" 2>/dev/null || true
+  __fzf_rtfm_preview_script=
+fi
+__fzf_rtfm_ensure_preview_script
+
+# Write the in-fzf path lister (full paths from find; keeps zoom/preview/insert correct).
+__fzf_rtfm_write_lister() {
+  local out="$1" state="$2" manfile="$3" keep_dotslash="$4"
+  {
+    print -r '#!/bin/sh'
+    print -r "statefile='$state'"
+    print -r "manfile='$manfile'"
+    print -r "keep_dotslash='$keep_dotslash'"
+    print -r 'dir=$(sed -n "1p" "$statefile")'
+    print -r 'hidden=$(sed -n "2p" "$statefile")'
+    print -r 'depth=$(sed -n "3p" "$statefile")'
+    print -r 'show_man=$(sed -n "4p" "$statefile")'
+    print -r 'mode=$(sed -n "5p" "$statefile")'
+    print -r '[ -n "$dir" ] || dir=.'
+    print -r '[ -n "$hidden" ] || hidden=1'
+    print -r '[ -n "$depth" ] || depth=1'
+    print -r 'case "$depth" in'
+    print -r '  *[!0-9]*|"") depth=1 ;;'
+    print -r 'esac'
+    print -r '[ -n "$show_man" ] || show_man=0'
+    print -r '[ -n "$mode" ] || mode=all'
+    print -r 'if [ "$show_man" = 1 ] && [ -s "$manfile" ]; then'
+    print -r '  cat "$manfile"'
+    print -r 'fi'
+    print -r '[ -d "$dir" ] || exit 0'
+    print -r 'if [ "$dir" = . ] || [ "$dir" = ./ ]; then'
+    print -r $'  printf \'/\\tf\\t\\n\''
+    print -r 'fi'
+    print -r 'if [ "$dir" = / ]; then'
+    print -r '  if [ "$hidden" = 1 ]; then'
+    print -r '    find / -mindepth 1 -maxdepth "$depth" \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print'
+    print -r '  else'
+    print -r '    find / -mindepth 1 -maxdepth "$depth" \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print'
+    print -r '  fi'
+    print -r 'elif [ "$hidden" = 1 ]; then'
+    print -r '  if [ "$mode" = dirs ]; then'
+    print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -type d -o -type l \)'
+    print -r '  else'
+    print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -type f -o -type d -o -type l \)'
+    print -r '  fi'
+    print -r 'else'
+    print -r '  if [ "$mode" = dirs ]; then'
+    print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -name ".*" -prune -o \( -type d -o -type l \) -print \)'
+    print -r '  else'
+    print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \)'
+    print -r '  fi'
+    print -r 'fi 2>/dev/null | sort | while IFS= read -r p; do'
+    print -r '  [ -z "$p" ] && continue'
+    print -r '  if { [ "$mode" = dirs ] || [ "$dir" = / ]; } && [ ! -d "$p" ]; then'
+    print -r '    continue'
+    print -r '  fi'
+    print -r '  name=$p'
+    print -r '  if [ "$dir" = . ] || [ "$dir" = ./ ]; then'
+    print -r '    name=${p#./}'
+    print -r '  fi'
+    print -r '  case "$name" in'
+    print -r '    .|..|*/.|*/..) continue ;;'
+    print -r '  esac'
+    print -r '  if [ "$keep_dotslash" = 1 ]; then'
+    print -r '    case "$name" in'
+    print -r '      ./*|/*) ;;'
+    print -r '      *) name="./$name" ;;'
+    print -r '    esac'
+    print -r '  fi'
+    print -r $'  printf \'%s\\tf\\t\\n\' "$name"'
+    print -r 'done'
+  } >"$out"
+}
+
+# Write Tab transformer (optional searchstate/filterfile/promptfile for options view).
+__fzf_rtfm_write_transformer() {
+  local out="$1" state="$2" lister="$3" zoom_mode="$4"
+  local searchstate="${5-}" filterfile="${6-}" promptfile="${7-}"
+  {
+    print -r '#!/bin/sh'
+    print -r "statefile='$state'"
+    print -r "lister='$lister'"
+    print -r "zoom_mode='$zoom_mode'"
+    [[ -n "$searchstate" ]] && print -r "searchstate='$searchstate'"
+    [[ -n "$filterfile" ]] && print -r "filterfile='$filterfile'"
+    [[ -n "$promptfile" ]] && print -r "promptfile='$promptfile'"
+    print -r 'tok=$1'
+    print -r 'hidden=$(sed -n "2p" "$statefile")'
+    print -r 'mode=$(sed -n "5p" "$statefile")'
+    print -r '[ -n "$hidden" ] || hidden=1'
+    print -r '[ -n "$mode" ] || mode=all'
+    print -r '[ -n "$zoom_mode" ] || zoom_mode=all'
+    print -r 'has_entries=0'
+    print -r 'check_mode=$zoom_mode'
+    print -r '[ -n "$check_mode" ] || check_mode=$mode'
+    print -r 'if [ -d "$tok" ]; then'
+    print -r '  if [ "$tok" = / ]; then'
+    print -r '    if [ "$hidden" = 1 ]; then'
+    print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
+    print -r '    else'
+    print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
+    print -r '    fi'
+    print -r '  elif [ "$check_mode" = dirs ]; then'
+    print -r '    if [ "$hidden" = 1 ]; then'
+    print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) 2>/dev/null | head -n 1)'
+    print -r '    else'
+    print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
+    print -r '    fi'
+    print -r '    [ -n "$first" ] && [ -d "$first" ] || first='
+    print -r '  elif [ "$hidden" = 1 ]; then'
+    print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null | head -n 1)'
+    print -r '  else'
+    print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
+    print -r '  fi'
+    print -r '  [ -n "$first" ] && has_entries=1'
+    print -r 'fi'
+    print -r 'if [ -d "$tok" ] && [ "$has_entries" = 1 ]; then'
+    print -r '  { printf "%s\n" "$tok"; printf "%s\n" "$hidden"; printf "%s\n" 1; printf "%s\n" 0; printf "%s\n" "$zoom_mode"; } > "$statefile"'
+    if [[ -n "$searchstate" ]]; then
+      print -r '  : > "$searchstate"'
+      print -r '  : > "$filterfile"'
+    fi
+    print -r '  zoom_hdr=$(printf %s "$tok" | tr "()\n\t" "[]  ")'
+    if [[ -n "$promptfile" ]]; then
+      print -r '  printf "reload(%s)+clear-query+enable-search+unbind(n)+unbind(N)+unbind(p)+change-header()+change-prompt(%s/ > )\n" "$lister" "$zoom_hdr"'
+    else
+      print -r '  printf "reload(%s)+clear-query+unbind(n)+unbind(N)+unbind(p)+change-header()+change-prompt(%s/ > )\n" "$lister" "$zoom_hdr"'
+    fi
+    print -r 'else'
+    print -r '  printf "accept\n"'
+    print -r 'fi'
+  } >"$out"
+}
+
+# Write Alt-. toggler; clears active Ctrl-f filter so listing stays consistent.
+__fzf_rtfm_write_toggler() {
+  local out="$1" state="$2" lister="$3" searchstate="${4-}" filterfile="${5-}"
+  {
+    print -r '#!/bin/sh'
+    print -r "statefile='$state'"
+    print -r "lister='$lister'"
+    [[ -n "$searchstate" ]] && print -r "searchstate='$searchstate'"
+    [[ -n "$filterfile" ]] && print -r "filterfile='$filterfile'"
+    print -r 'dir=$(sed -n "1p" "$statefile")'
+    print -r 'hidden=$(sed -n "2p" "$statefile")'
+    print -r 'depth=$(sed -n "3p" "$statefile")'
+    print -r 'show_man=$(sed -n "4p" "$statefile")'
+    print -r 'mode=$(sed -n "5p" "$statefile")'
+    print -r '[ -n "$dir" ] || dir=.'
+    print -r '[ -n "$hidden" ] || hidden=1'
+    print -r '[ -n "$depth" ] || depth=1'
+    print -r '[ -n "$show_man" ] || show_man=0'
+    print -r '[ -n "$mode" ] || mode=all'
+    print -r 'if [ "$hidden" = 1 ]; then hidden=0; else hidden=1; fi'
+    print -r '{ printf "%s\n" "$dir"; printf "%s\n" "$hidden"; printf "%s\n" "$depth"; printf "%s\n" "$show_man"; printf "%s\n" "$mode"; } > "$statefile"'
+    if [[ -n "$searchstate" ]]; then
+      print -r 'if [ -n "$(sed -n "1p" "$searchstate" 2>/dev/null)" ]; then'
+      print -r '  : > "$searchstate"'
+      print -r '  : > "$filterfile"'
+      print -r '  printf "reload(%s)+clear-query+unbind(n)+unbind(N)+unbind(p)+change-header()\n" "$lister"'
+      print -r 'else'
+      print -r '  printf "reload(%s)\n" "$lister"'
+      print -r 'fi'
+    else
+      print -r 'printf "reload(%s)\n" "$lister"'
+    fi
+  } >"$out"
+}
+
 # ZLE leaves the *parent* shell TTY non-canonical during widgets; fzf needs the real TTY cooked
 # before its child runs. Subshell-only stty is not always enough — fix parent first, then restore.
 __fzf_rtfm_zle_parent_tty_prepare() {
@@ -301,6 +536,27 @@ __fzf_resolve_binary() {
 __fzf_man_topic_exists() {
   local topic="$1"
   command man -w "$topic" >/dev/null 2>&1
+}
+
+# Always force a non-interactive pager. Do not pass -P (mandoc has no -P;
+# groff man honors MANPAGER/PAGER). stdin from /dev/null so man never
+# touches the ZLE tty. Write through a temp file — avoid huge zsh scalars
+# (xtrace / ${(z)} quote dumps show up above the 90%-height fzf window).
+__fzf_rtfm_man_text() {
+  local topic="$1" tmp
+  [[ -n "$topic" ]] || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-man.XXXXXX") || return 1
+  if ! PAGER=cat MANPAGER=cat GROFF_NO_SGR=1 command man "$topic" </dev/null 2>/dev/null \
+      | command col -b >"$tmp"
+  then
+    command rm -f "$tmp"
+    return 1
+  fi
+  [[ -s "$tmp" ]] || { command rm -f "$tmp"; return 1; }
+  command cat "$tmp"
+  local ec=$?
+  command rm -f "$tmp"
+  return $ec
 }
 
 __fzf_get_help_text() {
@@ -366,6 +622,12 @@ __fzf_parse_dash_options_block() {
   printf '%s\n' "$text" | awk '
     function is_blank(s) { return s ~ /^[[:space:]]*$/ }
 
+    function is_footer(s) {
+      # Stop before man trailers (AUTHOR/SEE ALSO often contain quotes that
+      # must never land in fzf/shell strings).
+      return s ~ /^[[:space:]]*(SEE ALSO|AUTHOR|AUTHORS|REPORTING BUGS|COPYRIGHT|COLOPHON|BUGS|FILES|ENVIRONMENT|HISTORY|STANDARDS|NOTES|EXAMPLES)([[:space:]]|$)/
+    }
+
     function emit() {
       if (in_entry && token != "" ) {
         print token "\t" desc
@@ -376,6 +638,8 @@ __fzf_parse_dash_options_block() {
     }
 
     BEGIN { in_entry = 0; token=""; desc="" }
+
+    is_footer($0) { emit(); exit }
 
     # Detect an option start line:
     # first non-space must be '-' followed by a non-space char.
@@ -437,8 +701,45 @@ __fzf_parse_dash_options_block() {
       if (!in_entry) next
       if (is_blank($0)) next
 
-      # Stop if a new option start appears
-      if ($0 ~ /^[[:space:]]*-[^[:space:]]/) next
+      # New option start: emit previous entry, then re-process this line as a start.
+      if ($0 ~ /^[[:space:]]*-[^[:space:]]/) {
+        emit()
+        in_entry = 0
+        # Fall through by re-handling as option start (duplicate start logic below).
+        n = split($0, f, /[[:space:]]+/)
+        while (n > 0 && f[1] == "") {
+          for (k = 1; k < n; k++) f[k] = f[k+1]
+          n--
+        }
+        in_entry = 1
+        token = ""
+        desc = ""
+        last_token_idx = 0
+        i = 1
+        while (i <= n) {
+          if (f[i] ~ /^-/) {
+            token = (token == "" ? f[i] : token " " f[i])
+            last_token_idx = i
+            if (i + 1 <= n && f[i+1] ~ /^[<\[]/) {
+              token = token " " f[i+1]
+              last_token_idx = i + 1
+              i = i + 2
+              continue
+            }
+            i = i + 1
+            continue
+          }
+          break
+        }
+        if (last_token_idx > 0 && last_token_idx < n) {
+          for (j = last_token_idx + 1; j <= n; j++) {
+            desc = (desc == "" ? f[j] : desc " " f[j])
+          }
+        } else {
+          desc = ""
+        }
+        next
+      }
 
       l = $0
       gsub(/^[[:space:]]+/, "", l)
@@ -555,7 +856,7 @@ __fzf_docker_sub_options() {
 __fzf_ip_man_colb() {
   # $1: man topic, default ip
   local topic="${1:-ip}"
-  man "$topic" 2>/dev/null | col -b
+  __fzf_rtfm_man_text "$topic"
 }
 
 # Pull multi-line "OBJECT := { a | b | ... }" from ip(8) synopsis.
@@ -809,7 +1110,7 @@ EOF
 
 __fzf_sv_usage_line() {
   local manfull line
-  manfull="$(man sv 2>/dev/null | col -b)"
+  manfull="$(__fzf_rtfm_man_text sv)"
   line="$(print -r -- "$manfull" | command rg -m1 -i 'usage:' || true)"
   if [[ -z "$line" ]]; then
     if command -v timeout >/dev/null 2>&1; then
@@ -823,7 +1124,7 @@ __fzf_sv_usage_line() {
 
 __fzf_sv_entries() {
   local manfull opts opts_help usage_line opts_syn combined
-  manfull="$(man sv 2>/dev/null | col -b)"
+  manfull="$(__fzf_rtfm_man_text sv)"
 
   opts=""
   if [[ -n "$manfull" ]]; then
@@ -883,14 +1184,20 @@ __fzf_sv_is_verb() {
 }
 
 # True if the full command line already has a runit verb (e.g. check) so fzf should list services.
+# Skips leading wrappers (sudo, doas, …) the same way as __fzf_get_cmd_and_sub.
 __fzf_sv_should_offer_services() {
   local line="$1"
   [[ -z "$line" ]] && return 1
   setopt localoptions noshwordsplit
   local words=(${(z)line})
   (( ${#words} >= 2 )) || return 1
-  [[ "${words[1]}" == sv ]] || return 1
-  local i=2 found_verb=0
+  local start_idx=1
+  while (( start_idx <= ${#words} )) && __fzf_rtfm_is_wrapper "${words[start_idx]}"; do
+    (( start_idx++ ))
+  done
+  (( start_idx <= ${#words} )) || return 1
+  [[ "${words[start_idx]}" == sv ]] || return 1
+  local i=$(( start_idx + 1 )) found_verb=0
   while (( i <= ${#words} )); do
     local w="${words[i]}"
     case "$w" in
@@ -947,11 +1254,23 @@ __fzf_rtfm_is_wrapper() {
   return 1
 }
 
+# Split a command line into words without ${(z)} — unmatched quotes in a
+# token must not print a zsh parse dump above the 90%-height fzf UI.
+__fzf_rtfm_wsplit() {
+  setopt localoptions noshwordsplit
+  local __s="$1"
+  local -a __w
+  __w=("${(s: :)__s}")
+  __w=("${__w[@]:#}")
+  print -r -- "${(F)__w}"
+}
+
 __fzf_get_cmd_and_sub() {
   # cmd = first real command after wrappers; sub = first non-option word after cmd
   setopt localoptions noshwordsplit
 
-  local words=(${(z)LBUFFER})
+  local -a words
+  words=("${(@f)$( __fzf_rtfm_wsplit "$LBUFFER" )}")
   (( ${#words} == 0 )) && return 1
 
   local start_idx=1
@@ -972,6 +1291,54 @@ __fzf_get_cmd_and_sub() {
   printf '%s\t%s\n' "$cmd" "$sub"
 }
 
+# Prefer OPTIONS section from a man topic; fall back to full-page dash parse.
+# Man page is kept on disk only — never assigned to a zsh scalar.
+__fzf_rtfm_man_options_from_topic() {
+  local topic="$1" tmp opts
+  [[ -n "$topic" ]] || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-manpage.XXXXXX") || return 1
+  if ! PAGER=cat MANPAGER=cat GROFF_NO_SGR=1 command man "$topic" </dev/null 2>/dev/null \
+      | command col -b >"$tmp"
+  then
+    command rm -f "$tmp"
+    return 1
+  fi
+  [[ -s "$tmp" ]] || { command rm -f "$tmp"; return 1; }
+  opts="$(command awk '
+    /^[[:space:]]*OPTIONS([[:space:]]|$)/ { in_opt = 1; next }
+    in_opt && /^[[:space:]]*(SEE ALSO|AUTHOR|AUTHORS|REPORTING BUGS|COPYRIGHT|COLOPHON|BUGS|EXIT STATUS|EXIT VALUES|ENVIRONMENT|FILES|HISTORY|STANDARDS|NOTES)([[:space:]]|$)/ { exit }
+    in_opt { print }
+  ' "$tmp" | __fzf_parse_dash_options_block)" || opts=""
+  if [[ -z "$opts" ]]; then
+    opts="$(command cat "$tmp" | __fzf_parse_dash_options_block)" || opts=""
+  fi
+  command rm -f "$tmp"
+  [[ -n "$opts" ]] || return 1
+  printf '%s\n' "$opts"
+}
+
+# Cache parsed entries so Tab-continue does not re-run man (avoids the
+# 90%-height gap above fzf filling with man/quote noise).
+typeset -gA __fzf_rtfm_entry_cache
+
+__fzf_build_entries_cached() {
+  local cmd="$1" sub="$2" full="${3-}" key e
+  # sv depends on the full line / $SVDIR — do not cache.
+  if [[ "$cmd" == sv ]]; then
+    __fzf_build_entries "$cmd" "$sub" "$full"
+    return $?
+  fi
+  key="${cmd}"$'\t'"${sub}"
+  if [[ -n "${__fzf_rtfm_entry_cache[$key]-}" ]]; then
+    print -r -- "${__fzf_rtfm_entry_cache[$key]}"
+    return 0
+  fi
+  e="$(__fzf_build_entries "$cmd" "$sub" "$full" 2>/dev/null)" || return $?
+  [[ -n "$e" ]] || return 1
+  __fzf_rtfm_entry_cache[$key]="$e"
+  print -r -- "$e"
+}
+
 # ---------- Build entries (token<TAB>description) ----------
 __fzf_build_entries() {
   # $1: cmd
@@ -987,8 +1354,30 @@ __fzf_build_entries() {
       __fzf_ip_root_entries || return 1
       return 0
     else
-      __fzf_ip_submanual_entries "$sub" || return 1
-      return 0
+      # Prefer OBJECT man page; if sub is not an object (e.g. a verb), try resolving
+      # the first non-flag word after ip from the full line as the OBJECT.
+      if __fzf_ip_submanual_entries "$sub"; then
+        return 0
+      fi
+      if [[ -n "$full_line" ]]; then
+        setopt localoptions noshwordsplit
+        local -a _ipw=(${(z)full_line})
+        local _i=1 _obj=""
+        while (( _i <= ${#_ipw} )) && __fzf_rtfm_is_wrapper "${_ipw[_i]}"; do
+          ((_i++))
+        done
+        ((_i++)) # skip ip
+        while (( _i <= ${#_ipw} )); do
+          [[ "${_ipw[_i]}" == -* ]] && { ((_i++)); continue; }
+          _obj="${_ipw[_i]}"
+          break
+        done
+        if [[ -n "$_obj" && "$_obj" != "$sub" ]]; then
+          __fzf_ip_submanual_entries "$_obj" || return 1
+          return 0
+        fi
+      fi
+      return 1
     fi
   fi
 
@@ -1007,16 +1396,18 @@ __fzf_build_entries() {
       __fzf_docker_root_entries
       return 0
     else
-      # docker <sub>: parse docker SUB --help options
+      # Prefer man docker-SUB when present; else docker SUB --help (no root fallback).
       local opts
-      opts="$(__fzf_docker_sub_options "$sub")" || opts=""
-      # If we can't extract anything from the subcommand help, fall back to root entries
-      # so the UI still offers something meaningful.
-      if [[ -n "$opts" ]]; then
-        printf '%s\n' "$opts"
-      else
-        __fzf_docker_root_entries
+      if __fzf_man_topic_exists "docker-${sub}"; then
+        opts="$(__fzf_rtfm_man_options_from_topic "docker-${sub}")" || opts=""
+        if [[ -n "$opts" ]]; then
+          printf '%s\n' "$opts"
+          return 0
+        fi
       fi
+      opts="$(__fzf_docker_sub_options "$sub")" || opts=""
+      [[ -n "$opts" ]] || return 1
+      printf '%s\n' "$opts"
       return 0
     fi
   fi
@@ -1028,7 +1419,7 @@ __fzf_build_entries() {
       local subs opts topic merged
       topic="$cmd"
       subs="$(__fzf_parse_man_subcommands "$cmd")" || true
-      opts="$(man "$topic" 2>/dev/null | col -b | __fzf_parse_dash_options_block)" || true
+      opts="$(__fzf_rtfm_man_options_from_topic "$topic")" || opts=""
       merged="$(printf '%s\n%s\n' "$subs" "$opts" | awk 'NF' | sort -u)"
       if [[ -n "$merged" ]]; then
         printf '%s\n' "$merged"
@@ -1048,8 +1439,7 @@ __fzf_build_entries() {
     # sub is present: treat as binary-sub for sub-man (binary-sub). If no man, fall back to binary sub help.
     local topic="${cmd}-${sub}"
     if __fzf_man_topic_exists "$topic"; then
-      man "$topic" 2>/dev/null | col -b | __fzf_parse_dash_options_block | awk 'NF' | sort -u
-      return 0
+      __fzf_rtfm_man_options_from_topic "$topic" && return 0
     fi
 
     # no sub-man: use help from "$cmd $sub --help" (best effort)
@@ -1071,6 +1461,49 @@ __fzf_build_entries() {
     printf '%s\n' "$help_txt" | __fzf_parse_dash_options_block | awk 'NF' | sort -u
     return 0
   fi
+}
+
+# True when $2 appears as a finished root token (exact name, unique prefix,
+# or a well-known iproute2 alias). Used so `ip addr` / `ip li` count as objects
+# while `ip a` stays a filter query.
+__fzf_rtfm_root_token_known() {
+  local root_e="$1" sub="$2" cmd="${3-}"
+  [[ -n "$sub" ]] || return 1
+  if [[ -z "$root_e" ]]; then
+    [[ -n "$cmd" ]] && __fzf_man_topic_exists "${cmd}-${sub}"
+    return $?
+  fi
+  if [[ "$cmd" == ip ]]; then
+    case "$sub" in
+      addr) sub=address ;;
+      neigh) sub=neighbour ;;
+    esac
+  fi
+  print -r -- "$root_e" | command awk -F '\t' -v s="$sub" '
+    $1 == s { exact = 1 }
+    index($1, s) == 1 { n++ }
+    END { exit !(exact || n == 1) }
+  '
+}
+
+# True when the current token is a finished subcommand, not an incomplete
+# prefix. Used to keep `sub` and clear the fzf query so option tokens
+# (e.g. docker ps → --all) are not hidden by fuzzy-matching the sub name.
+# Incomplete prefixes (docker p, git sta, sv sta, ip a, podman p) stay as
+# the query against the root list.
+__fzf_rtfm_sub_token_complete() {
+  local cmd="$1" sub="$2" lastw="$3" full="${4-}"
+  [[ -n "$sub" && "$lastw" == "$sub" && "$lastw" != -* ]] || return 1
+
+  local sub_e root_e
+  root_e="$(__fzf_build_entries "$cmd" "" "$full" 2>/dev/null)" || root_e=""
+  __fzf_rtfm_root_token_known "$root_e" "$sub" "$cmd" || return 1
+
+  sub_e="$(__fzf_build_entries "$cmd" "$sub" "$full" 2>/dev/null)" || return 1
+  [[ -n "$sub_e" ]] || return 1
+  # sv (and similar) always emit the root verb list for any token; that is
+  # not a real sub page.
+  [[ "$sub_e" != "$root_e" ]]
 }
 
 # ---------- Diagnostic: probe how a command exposes docs (man / help / stderr) ----------
@@ -1123,7 +1556,7 @@ __fzf_diagnose_cmd() {
 
   if __fzf_man_topic_exists "$name"; then
     print -r -- "[MAN] excerpt (col -b, first 28 lines):"
-    man "$name" 2>/dev/null | col -b | awk 'NR<=28{print "    " $0}'
+    __fzf_rtfm_man_text "$name" | awk 'NR<=28{print "    " $0}'
   else
     print -r -- "[MAN] excerpt: skipped"
   fi
@@ -1131,7 +1564,7 @@ __fzf_diagnose_cmd() {
 
   if __fzf_man_topic_exists "$name"; then
     local nparse
-    nparse="$(man "$name" 2>/dev/null | col -b | __fzf_parse_dash_options_block 2>/dev/null | awk 'END{print NR+0}')"
+    nparse="$(__fzf_rtfm_man_text "$name" | __fzf_parse_dash_options_block 2>/dev/null | awk 'END{print NR+0}')"
     print -r -- "[PARSE] __fzf_parse_dash_options_block (full man page): ${nparse} entries"
   else
     print -r -- "[PARSE] (skipped, no main man page)"
@@ -1178,15 +1611,25 @@ __fzf_diagnose_cmd() {
   entries="$({ __fzf_build_entries "$name" ""; } 2>/dev/null)" || true
   ecnt="$(print -r -- "$entries" | awk 'NF { c++ } END { print c+0 }')"
   print -r -- "    ${ecnt} row(s) — 0 often means man/help shape needs a special case"
+  if (( ecnt > 0 )); then
+    print -r -- "    sample:"
+    print -r -- "$entries" | awk 'NF && NR<=5 { print "      " $0 }'
+  fi
   print -r -- ""
 
   print -r -- "[HINT] current widget handling:"
   case "$name" in
     ip) print -r -- "    branch: ip (OBJECT + OPTIONS section + ip-<object> pages)" ;;
-    docker) print -r -- "    branch: docker (docker --help / docker SUB --help)" ;;
-    sv) print -r -- "    branch: sv (OPTIONS+verbs, then services from \$SVDIR or /var/service when line has a verb)" ;;
-    *) print -r -- "    branch: generic (man + man -k; else help; empty parse => extend or add a branch)" ;;
+    docker) print -r -- "    branch: docker (docker --help / docker SUB --help; no root fallback on bad sub)" ;;
+    sv)
+      print -r -- "    branch: sv (OPTIONS+verbs, then services from \$SVDIR or /var/service when line has a verb)"
+      print -r -- "    sv status  → services? $(__fzf_sv_should_offer_services 'sv status' && print yes || print no)"
+      print -r -- "    sudo sv status → services? $(__fzf_sv_should_offer_services 'sudo sv status' && print yes || print no)"
+      print -r -- "    SVDIR=${SVDIR-unset}"
+      ;;
+    *) print -r -- "    branch: generic (man OPTIONS section + man -k; else help)" ;;
   esac
+  print -r -- "    --scheme path opts: ${(j: :)__fzf_rtfm_merged_path_scheme:-(none)}"
   print -r -- ""
   print -r -- "=== end ==="
 }
@@ -1263,7 +1706,7 @@ __fzf_pick() {
       --delimiter=$'\t' \
       --with-nth=1 \
       --nth=1 \
-      --preview 'printf "%s\n" {2}' \
+      --preview "$__fzf_rtfm_preview_script {1} m" \
       --preview-window="$__fzf_rtfm_fzf_preview_window" \
       "${__fzf_rtfm_fzf_binds_preview[@]}" \
       "${qopts[@]}"
@@ -1289,13 +1732,24 @@ __fzf_zle_token_state() {
   local lb="$LBUFFER"
   local -a words
 
+  # ${(z)} prints a parse dump on unmatched quotes (visible above 90% fzf).
+  # Prefer it when it works; fall back to space-split with stderr silenced.
+  _fzf_rtfm_try_zsplit() {
+    local __s="$1"
+    local -a __w
+    { __w=("${(z)__s}"); } 2>/dev/null || __w=("${(s: :)__s}")
+    __w=("${__w[@]:#}")
+    words=("${__w[@]}")
+  }
+
   if [[ "$lb" == *([[:space:]]) ]]; then
-    prefix_rest="${lb%%+([[:space:]])}"
+    # zsh: use [[:space:]]## — +([[:space:]]) does not strip trailing blanks.
+    prefix_rest="${lb%%[[:space:]]##}"
     lastw=""
-    words=(${(z)prefix_rest})
+    _fzf_rtfm_try_zsplit "$prefix_rest"
     nwords=$((${#words} + 1))
   else
-    words=(${(z)lb})
+    _fzf_rtfm_try_zsplit "$lb"
     nwords=${#words}
     lastw="${words[-1]}"
     if (( nwords >= 2 )); then
@@ -1310,9 +1764,38 @@ __fzf_zle_token_state() {
   fi
 }
 
+# Join a relative pick onto a typed directory prefix in lastw when needed.
+# Full/absolute picks and picks already under the prefix are left unchanged.
+__fzf_rtfm_resolve_path_pick() {
+  setopt localoptions noshwordsplit
+  local picked="$1" prefix="${2-$lastw}" base exp
+  [[ -n "$picked" ]] || return 1
+  if [[ -z "$prefix" || "$picked" == /* ]]; then
+    print -r -- "$picked"
+    return 0
+  fi
+  # Only join when the current token is a directory prefix.
+  if [[ "$prefix" != */ ]]; then
+    exp="$prefix"
+    [[ "$exp" == '~'* ]] && exp="${~exp}"
+    if [[ ! -d "$exp" ]]; then
+      print -r -- "$picked"
+      return 0
+    fi
+  fi
+  base="${prefix%/}"
+  if [[ -z "$base" || "$picked" == "$base" || "$picked" == "$base"/* || "$picked" == "./$base" || "$picked" == "./$base"/* ]]; then
+    print -r -- "$picked"
+    return 0
+  fi
+  # Bare basename (or ./name) under a typed dir prefix → prefix/name.
+  print -r -- "${base}/${picked#./}"
+}
+
 __fzf_apply_pick() {
   local picked="$1"
   [[ -z "$picked" ]] && return 1
+  picked="$(__fzf_rtfm_resolve_path_pick "$picked")"
   if [[ -z "$prefix_rest" ]]; then
     LBUFFER="${picked} "
   else
@@ -1324,6 +1807,7 @@ __fzf_apply_pick() {
 __fzf_apply_dir_pick() {
   local picked="$1"
   [[ -z "$picked" ]] && return 1
+  picked="$(__fzf_rtfm_resolve_path_pick "$picked")"
   picked="${picked%/}/"
   if [[ -z "$prefix_rest" ]]; then
     LBUFFER="${picked}"
@@ -1538,17 +2022,123 @@ __fzf_rtfm_text_wants_files() {
   '
 }
 
+# Drop man trailers so footers with quotes never sit in shell variables.
+__fzf_rtfm_docs_trim() {
+  command awk '
+    /^[[:space:]]*(SEE ALSO|AUTHOR|AUTHORS|REPORTING BUGS|COPYRIGHT|COLOPHON|BUGS|EXIT STATUS|EXIT VALUES)([[:space:]]|$)/ { exit }
+    { print }
+  '
+}
+
 __fzf_rtfm_docs_text() {
-  local cmd="$1" sub="$2"
+  local cmd="$1" sub="$2" text=""
+  # Prefer man whenever it exists (including docker-ps); trim footers.
   if [[ -n "$sub" ]] && __fzf_man_topic_exists "${cmd}-${sub}"; then
-    command man "${cmd}-${sub}" 2>/dev/null | command col -b
+    text="$(__fzf_rtfm_man_text "${cmd}-${sub}")" || text=""
+  elif __fzf_man_topic_exists "$cmd"; then
+    text="$(__fzf_rtfm_man_text "$cmd")" || text=""
+  fi
+  if [[ -z "$text" && "$cmd" == docker ]]; then
+    if [[ -n "$sub" ]]; then
+      text="$(PAGER=cat MANPAGER=cat docker "$sub" --help 2>/dev/null)" || text=""
+    else
+      text="$(PAGER=cat MANPAGER=cat docker --help 2>/dev/null)" || text=""
+    fi
+  fi
+  if [[ -z "$text" ]]; then
+    __fzf_get_help_text "$cmd" 2>/dev/null
+    return $?
+  fi
+  print -r -- "$text" | __fzf_rtfm_docs_trim
+}
+
+# True when the command should mix cwd files into the picker. Avoids loading
+# the full man page (quote-laden) on every Tab-continue just to decide.
+__fzf_rtfm_cmd_wants_files() {
+  local cmd="$1" sub="${2-}" entries="${3-}"
+  case "$cmd" in
+    ls|ll|la|cat|bat|less|more|head|tail|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|\
+    chgrp|file|stat|vim|nvim|nano|emacs|code|tar|unzip|gzip|gunzip|diff|patch|\
+    grep|rg|find|fd|hexdump|xxd|source|.)
+      return 0
+      ;;
+    docker)
+      case "$sub" in
+        run|build|cp|create|export|import|load|save|start) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  if [[ -n "$entries" ]] && print -r -- "$entries" | __fzf_rtfm_text_wants_files; then
     return 0
   fi
-  if __fzf_man_topic_exists "$cmd"; then
-    command man "$cmd" 2>/dev/null | command col -b
+  # SYNOPSIS-only man peek (never the full page / EXIT STATUS / SEE ALSO).
+  local topic="$cmd" syn
+  [[ -n "$sub" ]] && __fzf_man_topic_exists "${cmd}-${sub}" && topic="${cmd}-${sub}"
+  syn="$(__fzf_rtfm_man_text "$topic" 2>/dev/null | command awk '
+    NR > 80 { exit }
+    /^[[:space:]]*(DESCRIPTION|OPTIONS|EXIT STATUS|EXIT VALUES|SEE ALSO|AUTHOR)([[:space:]]|$)/ { exit }
+    { print }
+  ')" || syn=""
+  [[ -n "$syn" ]] && __fzf_rtfm_text_wants_files "$syn"
+}
+
+# Convert token<TAB>desc rows into fzf man_rows, neutralize quotes in descs,
+# and drop tokens already present on the command line (no double --author).
+__fzf_rtfm_entries_to_man_rows() {
+  local entries="$1" cmdline="${2-}"
+  [[ -n "$entries" ]] || return 0
+  print -r -- "$entries" | command awk -F '\t' 'NF {
+    desc = $2
+    gsub(/[ \t\n\r]+/, " ", desc)
+    # Apostrophes in man text (Don'\''t, '\''table'\'') must not reach $SHELL -c.
+    gsub(/'\''/, "′", desc)
+    print $1 "\tm\t" desc
+  }' | __fzf_rtfm_filter_used_line_tokens "$cmdline"
+}
+
+# Remove picker rows whose token forms are already on the line.
+__fzf_rtfm_filter_used_line_tokens() {
+  setopt localoptions noshwordsplit
+  local cmdline="${1-}"
+  local usedfile w form
+  usedfile=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-used.XXXXXX") || {
+    cat
     return 0
-  fi
-  __fzf_get_help_text "$cmd" 2>/dev/null
+  }
+  {
+    local -a words
+    words=("${(@f)$( __fzf_rtfm_wsplit "$cmdline" )}")
+    for w in "${words[@]}"; do
+      [[ -n "$w" ]] || continue
+      print -r -- "$w"
+      form="${w%%\=*}"
+      [[ "$form" != "$w" && -n "$form" ]] && print -r -- "$form"
+      if [[ "$w" == */* && "$w" != -* ]]; then
+        print -r -- "${w:t}"
+      fi
+    done
+  } >"$usedfile"
+  command awk -F '\t' '
+    NR == FNR { if ($0 != "") u[$0] = 1; next }
+    {
+      tok = $1
+      n = split(tok, forms, /,[ \t]+|[ \t]+/)
+      drop = 0
+      for (i = 1; i <= n; i++) {
+        f = forms[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", f)
+        if (f == "") continue
+        base = f
+        sub(/=.*/, "", base)
+        if (u[f] || (base != "" && u[base])) { drop = 1; break }
+      }
+      if (!drop) print
+    }
+  ' "$usedfile" -
+  local ec=$?
+  command rm -f "$usedfile"
+  return $ec
 }
 
 __fzf_last_word_is_pathlike() {
@@ -1660,13 +2250,18 @@ __fzf_tab_immediate_file_rows() {
       if [[ "$mode" == dirs || "$dir" == / ]] && [[ ! -d "$p" ]]; then
         continue
       fi
-      name="${p#./}"
+      # Keep find paths (dir/name) so zoom/preview/insert retain the parent.
+      # Only strip a lone "./" prefix when listing from cwd without forced ./ keep.
+      name="$p"
+      if [[ "$dir" == . || "$dir" == ./ ]]; then
+        name="${p#./}"
+      fi
       # Never offer . / .. / path/.. as picks.
       case "$name" in
         . | .. | */. | */..) continue ;;
       esac
       if (( keep_dotslash )); then
-        [[ "$name" == ./* ]] || name="./$name"
+        [[ "$name" == ./* || "$name" == /* ]] || name="./$name"
       fi
       print -r -- "$name"$'\tf\t'
     done
@@ -1696,7 +2291,8 @@ __fzf_pick_mixed() {
   local list_mode="${9:-$zoom_mode}"
   local selection fzf_ec=0 ps state lister transformer toggler manfile
   local entries_file filterfile searchstate searcher search_enter search_next search_prev search_esc promptfile
-  local -a qopts=() expect_opts=() bind_opts=()
+  local preview_out focus_script
+  local -a qopts=() expect_opts=() bind_opts=() scheme_opts=() preview_opts=()
   local keep_dotslash=0
   [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
   [[ -n "$query" ]] && qopts=(--query="$query")
@@ -1705,7 +2301,9 @@ __fzf_pick_mixed() {
   [[ "$list_mode" == dirs || "$list_mode" == all ]] || list_mode="$zoom_mode"
   [[ "$zoom_mode" == dirs || "$zoom_mode" == all ]] || zoom_mode=all
   list_depth=1
-  ps=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-prev.XXXXXX")
+  scheme_opts=("${__fzf_rtfm_merged_path_scheme[@]}")
+  __fzf_rtfm_ensure_preview_script || return 1
+  ps="$__fzf_rtfm_preview_script"
   state=
   lister=
   transformer=
@@ -1720,44 +2318,8 @@ __fzf_pick_mixed() {
   search_prev=
   search_esc=
   promptfile=
-  {
-    print -r '#!/bin/sh'
-    print -r 'line=$1'
-    print -r 'kind=$(printf %s "$line" | cut -f2)'
-    print -r 'tok=$(printf %s "$line" | cut -f1)'
-    print -r 'desc=$(printf %s "$line" | cut -f3-)'
-    print -r 'if [ "$kind" != f ]; then'
-    print -r '  printf "%s\n" "$desc"'
-    print -r '  exit 0'
-    print -r 'fi'
-    print -r 'ls -ld -- "$tok" 2>/dev/null'
-    print -r 'if [ -d "$tok" ]; then'
-    print -r '  printf "\n"'
-    print -r '  ls -la -- "$tok" 2>/dev/null | head -n 80'
-    print -r '  exit 0'
-    print -r 'fi'
-    print -r 'if [ ! -e "$tok" ] && [ ! -L "$tok" ]; then'
-    print -r '  exit 0'
-    print -r 'fi'
-    print -r 'printf "\n"'
-    print -r 'mime='
-    print -r 'if command -v file >/dev/null 2>&1; then'
-    print -r '  mime=$(file -b --mime-type -- "$tok" 2>/dev/null || true)'
-    print -r 'fi'
-    print -r 'case "$mime" in'
-    print -r '  ""|text/*|*empty*|inode/x-empty|application/json|application/xml|application/javascript|application/x-sh|application/x-shellscript|application/x-csh|application/toml|application/yaml|application/x-yaml|application/sql)'
-    print -r '    head -n 500 -- "$tok" 2>/dev/null'
-    print -r '    ;;'
-    print -r '  *)'
-    print -r '    if command -v file >/dev/null 2>&1; then'
-    print -r '      file -- "$tok" 2>/dev/null'
-    print -r '    else'
-    print -r '      printf "(binary or non-text file)\n"'
-    print -r '    fi'
-    print -r '    ;;'
-    print -r 'esac'
-  } >"$ps"
-  command chmod +x "$ps"
+  preview_out=
+  focus_script=
 
   if [[ -n "$with_expect" ]]; then
     state=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-nav.XXXXXX")
@@ -1781,130 +2343,38 @@ __fzf_pick_mixed() {
     else
       : >"$manfile"
     fi
-    {
-      print -r '#!/bin/sh'
-      print -r "statefile='$state'"
-      print -r "manfile='$manfile'"
-      print -r "keep_dotslash='$keep_dotslash'"
-      print -r 'dir=$(sed -n "1p" "$statefile")'
-      print -r 'hidden=$(sed -n "2p" "$statefile")'
-      print -r 'depth=$(sed -n "3p" "$statefile")'
-      print -r 'show_man=$(sed -n "4p" "$statefile")'
-      print -r 'mode=$(sed -n "5p" "$statefile")'
-      print -r '[ -n "$dir" ] || dir=.'
-      print -r '[ -n "$hidden" ] || hidden=1'
-      print -r '[ -n "$depth" ] || depth=1'
-      print -r 'case "$depth" in'
-      print -r '  *[!0-9]*|"") depth=1 ;;'
-      print -r 'esac'
-      print -r '[ -n "$show_man" ] || show_man=0'
-      print -r '[ -n "$mode" ] || mode=all'
-      print -r 'if [ "$show_man" = 1 ] && [ -s "$manfile" ]; then'
-      print -r '  cat "$manfile"'
-      print -r 'fi'
-      print -r '[ -d "$dir" ] || exit 0'
-      print -r 'if [ "$dir" = . ] || [ "$dir" = ./ ]; then'
-      print -r $'  printf \'/\\tf\\t\\n\''
-      print -r 'fi'
-      print -r 'if [ "$dir" = / ]; then'
-      print -r '  if [ "$hidden" = 1 ]; then'
-      print -r '    find / -mindepth 1 -maxdepth "$depth" \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print'
-      print -r '  else'
-      print -r '    find / -mindepth 1 -maxdepth "$depth" \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print'
-      print -r '  fi'
-      print -r 'elif [ "$hidden" = 1 ]; then'
-      print -r '  if [ "$mode" = dirs ]; then'
-      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -type d -o -type l \)'
-      print -r '  else'
-      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -type f -o -type d -o -type l \)'
-      print -r '  fi'
-      print -r 'else'
-      print -r '  if [ "$mode" = dirs ]; then'
-      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -name ".*" -prune -o \( -type d -o -type l \) -print \)'
-      print -r '  else'
-      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \)'
-      print -r '  fi'
-      print -r 'fi 2>/dev/null | sort | while IFS= read -r p; do'
-      print -r '  [ -z "$p" ] && continue'
-      print -r '  if { [ "$mode" = dirs ] || [ "$dir" = / ]; } && [ ! -d "$p" ]; then'
-      print -r '    continue'
-      print -r '  fi'
-      print -r '  name=${p#./}'
-      print -r '  case "$name" in'
-      print -r '    .|..|*/.|*/..) continue ;;'
-      print -r '  esac'
-      print -r '  if [ "$keep_dotslash" = 1 ]; then'
-      print -r '    case "$name" in'
-      print -r '      ./*) ;;'
-      print -r '      *) name="./$name" ;;'
-      print -r '    esac'
-      print -r '  fi'
-      print -r $'  printf \'%s\\tf\\t\\n\' "$name"'
-      print -r 'done'
-    } >"$lister"
-    {
-      print -r '#!/bin/sh'
-      print -r "statefile='$state'"
-      print -r "lister='$lister'"
-      print -r "zoom_mode='$zoom_mode'"
-      print -r 'tok=$1'
-      print -r 'hidden=$(sed -n "2p" "$statefile")'
-      print -r 'mode=$(sed -n "5p" "$statefile")'
-      print -r '[ -n "$hidden" ] || hidden=1'
-      print -r '[ -n "$mode" ] || mode=all'
-      print -r '[ -n "$zoom_mode" ] || zoom_mode=all'
-      print -r 'has_entries=0'
-      print -r '# Use zoom_mode: after Tab the listing switches to that mode.'
-      print -r 'check_mode=$zoom_mode'
-      print -r '[ -n "$check_mode" ] || check_mode=$mode'
-      print -r 'if [ -d "$tok" ]; then'
-      print -r '  if [ "$tok" = / ]; then'
-      print -r '    if [ "$hidden" = 1 ]; then'
-      print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
-      print -r '    else'
-      print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
-      print -r '    fi'
-      print -r '  elif [ "$check_mode" = dirs ]; then'
-      print -r '    if [ "$hidden" = 1 ]; then'
-      print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) 2>/dev/null | head -n 1)'
-      print -r '    else'
-      print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
-      print -r '    fi'
-      print -r '    [ -n "$first" ] && [ -d "$first" ] || first='
-      print -r '  elif [ "$hidden" = 1 ]; then'
-      print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null | head -n 1)'
-      print -r '  else'
-      print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
-      print -r '  fi'
-      print -r '  [ -n "$first" ] && has_entries=1'
-      print -r 'fi'
-      print -r 'if [ -d "$tok" ] && [ "$has_entries" = 1 ]; then'
-      print -r '  { printf "%s\n" "$tok"; printf "%s\n" "$hidden"; printf "%s\n" 1; printf "%s\n" 0; printf "%s\n" "$zoom_mode"; } > "$statefile"'
-      print -r '  if [ -n "$searchstate" ]; then : > "$searchstate"; fi'
-      print -r '  printf "reload(%s)+clear-query+unbind(n)+unbind(N)+unbind(p)+change-header()\n" "$lister"'
-      print -r 'else'
-      print -r '  printf "accept\n"'
-      print -r 'fi'
-    } >"$transformer"
-    {
-      print -r '#!/bin/sh'
-      print -r "statefile='$state'"
-      print -r "lister='$lister'"
-      print -r 'dir=$(sed -n "1p" "$statefile")'
-      print -r 'hidden=$(sed -n "2p" "$statefile")'
-      print -r 'depth=$(sed -n "3p" "$statefile")'
-      print -r 'show_man=$(sed -n "4p" "$statefile")'
-      print -r 'mode=$(sed -n "5p" "$statefile")'
-      print -r '[ -n "$dir" ] || dir=.'
-      print -r '[ -n "$hidden" ] || hidden=1'
-      print -r '[ -n "$depth" ] || depth=1'
-      print -r '[ -n "$show_man" ] || show_man=0'
-      print -r '[ -n "$mode" ] || mode=all'
-      print -r 'if [ "$hidden" = 1 ]; then hidden=0; else hidden=1; fi'
-      print -r '{ printf "%s\n" "$dir"; printf "%s\n" "$hidden"; printf "%s\n" "$depth"; printf "%s\n" "$show_man"; printf "%s\n" "$mode"; } > "$statefile"'
-      print -r 'printf "reload(%s)\n" "$lister"'
-    } >"$toggler"
+    __fzf_rtfm_write_lister "$lister" "$state" "$manfile" "$keep_dotslash"
+    __fzf_rtfm_write_transformer "$transformer" "$state" "$lister" "$zoom_mode"
+    __fzf_rtfm_write_toggler "$toggler" "$state" "$lister"
     command chmod +x "$lister" "$transformer" "$toggler"
+    # Preview via a fixed file path only — never put man/desc text into
+    # $SHELL -c through fzf placeholders (quotes in man pages dump above fzf).
+    preview_out=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-pout.XXXXXX")
+    focus_script=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-pfocus.XXXXXX")
+    print -r -- "$entries" | command awk -F '\t' 'NF {
+      if ($2 == "f") { print $1; exit }
+      print $3; exit
+    }' >"$preview_out"
+    {
+      print -r '#!/bin/sh'
+      print -r "manfile='$manfile'"
+      print -r "preview_out='$preview_out'"
+      print -r 'tok=$1'
+      print -r 'if [ -e "$tok" ] || [ -L "$tok" ]; then'
+      print -r '  ls -ld -- "$tok" > "$preview_out" 2>/dev/null'
+      print -r '  exit 0'
+      print -r 'fi'
+      print -r 'awk -F "\t" -v t="$tok" '\''$1==t { print $3; exit }'\'' "$manfile" > "$preview_out" 2>/dev/null'
+    } >"$focus_script"
+    command chmod +x "$focus_script"
+    # Preview is ONLY `cat` of a fixed path — no man text in $SHELL -c.
+    # Focus updates write the short desc into that file, then refresh.
+    preview_opts=(
+      --preview="cat -- '$preview_out'"
+      --preview-window="$__fzf_rtfm_fzf_preview_window"
+      --bind "focus:execute-silent($focus_script {1})+refresh-preview"
+    )
+    # Enter via transform when man_rows present; otherwise --expect=enter.
     expect_opts=(--expect=tab,enter)
     bind_opts=(
       "${__fzf_rtfm_fzf_binds_preview_nav[@]}"
@@ -1930,57 +2400,11 @@ __fzf_pick_mixed() {
       : >"$searchstate"
       : >"$filterfile"
       printf '%s\n' "$entries" >"$entries_file"
-      # Prompt bytes for transform-prompt restore (no trailing newline).
       printf '%s' "$prompt" >"$promptfile"
-      # Patch searchstate path into the already-written transformer.
-      {
-        print -r '#!/bin/sh'
-        print -r "statefile='$state'"
-        print -r "lister='$lister'"
-        print -r "zoom_mode='$zoom_mode'"
-        print -r "searchstate='$searchstate'"
-        print -r "filterfile='$filterfile'"
-        print -r "promptfile='$promptfile'"
-        print -r 'tok=$1'
-        print -r 'hidden=$(sed -n "2p" "$statefile")'
-        print -r 'mode=$(sed -n "5p" "$statefile")'
-        print -r '[ -n "$hidden" ] || hidden=1'
-        print -r '[ -n "$mode" ] || mode=all'
-        print -r '[ -n "$zoom_mode" ] || zoom_mode=all'
-        print -r 'has_entries=0'
-        print -r 'check_mode=$zoom_mode'
-        print -r '[ -n "$check_mode" ] || check_mode=$mode'
-        print -r 'if [ -d "$tok" ]; then'
-        print -r '  if [ "$tok" = / ]; then'
-        print -r '    if [ "$hidden" = 1 ]; then'
-        print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
-        print -r '    else'
-        print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
-        print -r '    fi'
-        print -r '  elif [ "$check_mode" = dirs ]; then'
-        print -r '    if [ "$hidden" = 1 ]; then'
-        print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) 2>/dev/null | head -n 1)'
-        print -r '    else'
-        print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
-        print -r '    fi'
-        print -r '    [ -n "$first" ] && [ -d "$first" ] || first='
-        print -r '  elif [ "$hidden" = 1 ]; then'
-        print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null | head -n 1)'
-        print -r '  else'
-        print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
-        print -r '  fi'
-        print -r '  [ -n "$first" ] && has_entries=1'
-        print -r 'fi'
-        print -r 'if [ -d "$tok" ] && [ "$has_entries" = 1 ]; then'
-        print -r '  { printf "%s\n" "$tok"; printf "%s\n" "$hidden"; printf "%s\n" 1; printf "%s\n" 0; printf "%s\n" "$zoom_mode"; } > "$statefile"'
-        print -r '  : > "$searchstate"'
-        print -r '  : > "$filterfile"'
-        print -r '  printf "reload(%s)+clear-query+enable-search+unbind(n)+unbind(N)+unbind(p)+change-header()+transform-prompt(cat %s)\n" "$lister" "$promptfile"'
-        print -r 'else'
-        print -r '  printf "accept\n"'
-        print -r 'fi'
-      } >"$transformer"
-      command chmod +x "$transformer"
+      __fzf_rtfm_write_transformer "$transformer" "$state" "$lister" "$zoom_mode" \
+        "$searchstate" "$filterfile" "$promptfile"
+      __fzf_rtfm_write_toggler "$toggler" "$state" "$lister" "$searchstate" "$filterfile"
+      command chmod +x "$transformer" "$toggler"
       # Ctrl-f: enter compose mode — type regex in the visible fzf input line.
       {
         print -r '#!/bin/sh'
@@ -2036,7 +2460,7 @@ __fzf_pick_mixed() {
         print -r 'fi'
         print -r 'printf "%s\n" "$pat" > "$searchstate"'
         print -r 'hdr_pat=$(printf %s "$pat" | tr "()\n\t" "[]  ")'
-        print -r 'printf "transform-prompt(cat %s)+enable-search+clear-query+reload(cat %s)+first+rebind(tab)+rebind(n)+rebind(N)+rebind(p)+change-header(search: %s  %s matches · n/N browse · Esc clear)\n" "$promptfile" "$filterfile" "$hdr_pat" "$nmatch"'
+        print -r 'printf "transform-prompt(cat %s)+enable-search+clear-query+reload(cat %s)+first+rebind(tab)+rebind(n)+rebind(N)+rebind(p)+change-header(search: %s  %s matches · n/N move · type to refine · Esc clear)\n" "$promptfile" "$filterfile" "$hdr_pat" "$nmatch"'
       } >"$search_enter"
       {
         print -r '#!/bin/sh'
@@ -2086,15 +2510,21 @@ __fzf_pick_mixed() {
     fi
   else
     bind_opts=("${__fzf_rtfm_fzf_binds_preview[@]}")
+    preview_opts=(
+      --preview="cat -- /dev/null"
+      --preview-window="$__fzf_rtfm_fzf_preview_window"
+    )
   fi
 
   local -i __fzf_mixed_done=0
   __fzf_mixed_fin() {
     ((__fzf_mixed_done)) && return 0
     __fzf_mixed_done=1
-    command rm -f "$ps" "$state" "$lister" "$transformer" "$toggler" "$manfile" \
+    # Do not remove cached preview script ($ps / __fzf_rtfm_preview_script).
+    command rm -f "$state" "$lister" "$transformer" "$toggler" "$manfile" \
       "$entries_file" "$filterfile" "$searchstate" "$searcher" "$search_enter" \
-      "$search_next" "$search_prev" "$search_esc" "$promptfile"
+      "$search_next" "$search_prev" "$search_esc" "$promptfile" \
+      "$preview_out" "$focus_script"
     __fzf_rtfm_zle_parent_tty_restore
     __fzf_tty_refreeze
   }
@@ -2113,8 +2543,8 @@ __fzf_pick_mixed() {
       --with-nth=1 \
       --nth=1 \
       --tiebreak=begin,length \
-      --preview="$ps {}" \
-      --preview-window="$__fzf_rtfm_fzf_preview_window" \
+      "${preview_opts[@]}" \
+      "${scheme_opts[@]}" \
       "${bind_opts[@]}" \
       "${expect_opts[@]}" \
       "${qopts[@]}"
@@ -2200,6 +2630,7 @@ __fzf_rtfm_browse_apply() {
       mixed="$(printf '%s\n' "$file_rows" | command awk 'NF')"
     fi
     if [[ -z "$mixed" ]]; then
+      zle -M 'RTFM: nothing to complete'
       zle redisplay
       return 0
     fi
@@ -2261,23 +2692,55 @@ __fzf_rtfm_browse_apply() {
     fi
     __fzf_zle_token_state
     q=""
-    show_prompt="$prompt"
     list_dir='.'
     list_depth=1
     list_mode="$mode"
-    man_rows="$orig_man_rows"
-    use_man=1
-    if __fzf_rtfm_path_only; then
-      use_man=0
-      man_rows=""
+    # Rebuild options for the new line (e.g. docker → docker ps --all, not root again).
+    man_rows=""
+    use_man=0
+    file_rows=""
+    if ! __fzf_rtfm_path_only; then
+      local _parsed _cmd _sub _entries
+      _parsed="$(__fzf_get_cmd_and_sub)" || _parsed=""
+      _cmd="${_parsed%%$'\t'*}"
+      _sub="${_parsed#*$'\t'}"
+      if [[ -n "$_cmd" ]] && ! __fzf_rtfm_is_wrapper "$_cmd"; then
+        if [[ "$_cmd" == cd || "$_cmd" == pushd ]]; then
+          man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
+          use_man=1
+          list_mode=dirs
+        elif _entries="$(__fzf_build_entries_cached "$_cmd" "$_sub" "${LBUFFER}${RBUFFER}" 2>/dev/null)"; then
+          man_rows="$(__fzf_rtfm_entries_to_man_rows "$_entries" "${LBUFFER}${RBUFFER}")"
+          [[ -n "$man_rows" ]] && use_man=1
+        fi
+        show_prompt="${_cmd}${_sub:+ $_sub} > "
+      else
+        show_prompt="$prompt"
+      fi
+    else
+      show_prompt="$prompt"
     fi
-    [[ -z "$orig_man_rows" ]] && use_man=0
+    # Already-chosen path args: drop them from the next file list.
+    if [[ "$_cmd" == cd || "$_cmd" == pushd ]]; then
+      man_rows="$(print -r -- "$man_rows" | __fzf_rtfm_filter_used_line_tokens "${LBUFFER}${RBUFFER}")"
+    fi
+    orig_man_rows="$man_rows"
     if __fzf_rtfm_is_dir_prefix; then
       list_mode=dirs
     fi
     __fzf_tab_path_token_dir_base
     list_dir="$dir"
-    file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" "$list_mode" 1 1)"
+    if [[ "$list_mode" == dirs ]] || __fzf_rtfm_path_only || [[ -n "$man_rows" ]]; then
+      # Paths when path-only, dir mode, or when usage may want files — refresh cwd listing.
+      if __fzf_rtfm_path_only || [[ "$list_mode" == dirs ]]; then
+        file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" "$list_mode" 1 1)"
+      else
+        if __fzf_rtfm_cmd_wants_files "${_cmd-}" "${_sub-}" "${_entries-}"; then
+          file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" all 1 1)"
+        fi
+      fi
+      [[ -n "$file_rows" ]] && file_rows="$(print -r -- "$file_rows" | __fzf_rtfm_filter_used_line_tokens "${LBUFFER}${RBUFFER}")"
+    fi
     continue
   done
 }
@@ -2286,22 +2749,26 @@ __fzf_tab_try_rtfm() {
   setopt localoptions noshwordsplit
   __fzf_tab_completing_command_name && return 1
 
-  local parsed cmd sub entries docs dir base q
+  local parsed cmd sub entries dir base q
   parsed="$(__fzf_get_cmd_and_sub)" || return 1
   cmd="${parsed%%$'\t'*}"
   sub="${parsed#*$'\t'}"
   [[ -z "$cmd" ]] && return 1
   __fzf_rtfm_is_wrapper "$cmd" && return 1
 
-  if [[ -n "$sub" && "$lastw" == "$sub" && "$lastw" != -* ]]; then
-    if ! __fzf_man_topic_exists "${cmd}-${sub}"; then
-      sub=""
-    fi
+  # If the current token is still the subcommand word (no trailing space):
+  # keep sub only when it is a finished sub (its page differs from root).
+  # Incomplete prefixes (`docker p`, `git sta`) stay as the fzf query.
+  local sub_complete=0
+  if __fzf_rtfm_sub_token_complete "$cmd" "$sub" "$lastw" "${LBUFFER}${RBUFFER}"; then
+    sub_complete=1
+  elif [[ -n "$sub" && "$lastw" == "$sub" && "$lastw" != -* ]]; then
+    sub=""
   fi
 
   entries=""
   if [[ "$cmd" != cd && "$cmd" != pushd ]]; then
-    if entries="$(__fzf_build_entries "$cmd" "$sub" "${LBUFFER}${RBUFFER}" 2>/dev/null)"; then
+    if entries="$(__fzf_build_entries_cached "$cmd" "$sub" "${LBUFFER}${RBUFFER}" 2>/dev/null)"; then
       :
     else
       entries=""
@@ -2315,11 +2782,13 @@ __fzf_tab_try_rtfm() {
   __fzf_rtfm_path_only && path_only=1
   __fzf_rtfm_is_dir_prefix && dir_only=1
 
+  local cmdline="${LBUFFER}${RBUFFER}"
   if [[ "$cmd" == cd || "$cmd" == pushd ]]; then
     # Do not use man cd (often Tcl) or man -k ^cd- (cd-paranoia as fake subcommands).
     # Path token: directories only (no -L/-P options).
     if (( !path_only )); then
       man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
+      man_rows="$(print -r -- "$man_rows" | __fzf_rtfm_filter_used_line_tokens "$cmdline")"
     fi
     if [[ "$lastw" != -* ]]; then
       dir='.' base=''
@@ -2328,13 +2797,12 @@ __fzf_tab_try_rtfm() {
     fi
   else
     if (( !path_only )) && [[ -n "$entries" ]]; then
-      man_rows="$(print -r -- "$entries" | command awk -F '\t' 'NF { print $1 "\tm\t" $2 }')"
+      man_rows="$(__fzf_rtfm_entries_to_man_rows "$entries" "$cmdline")"
     else
       man_rows=""
     fi
     if [[ "$lastw" != -* ]]; then
-      docs="$(__fzf_rtfm_docs_text "$cmd" "$sub" 2>/dev/null)" || docs=""
-      if (( path_only )) || { [[ -n "$docs" ]] && __fzf_rtfm_text_wants_files "$docs"; }; then
+      if (( path_only )) || __fzf_rtfm_cmd_wants_files "$cmd" "$sub" "$entries"; then
         local list_mode=all
         dir='.' base=''
         __fzf_tab_path_token_dir_base
@@ -2348,6 +2816,7 @@ __fzf_tab_try_rtfm() {
   if (( path_only )); then
     man_rows=""
   fi
+  [[ -n "$file_rows" ]] && file_rows="$(print -r -- "$file_rows" | __fzf_rtfm_filter_used_line_tokens "$cmdline")"
 
   local mixed
   if [[ -n "$man_rows" ]]; then
@@ -2361,10 +2830,17 @@ __fzf_tab_try_rtfm() {
   if [[ "$lastw" == / || "$lastw" == */* || "$lastw" == */ ]]; then
     q="$base"
   fi
+  # Complete sub on the token (`docker ps`, `git status`): show its options
+  # unfiltered. Incomplete prefix (`docker p`, `git sta`): keep q=lastw.
+  if (( sub_complete )); then
+    q=""
+  fi
 
   local mode=all
   [[ "$cmd" == cd || "$cmd" == pushd ]] && mode=dirs
-  __fzf_rtfm_browse_apply "$man_rows" "$file_rows" "$cmd > " "$q" "$mode" || return
+  local show_prompt="$cmd > "
+  [[ -n "$sub" && ( -z "$lastw" || sub_complete -eq 1 ) ]] && show_prompt="$cmd $sub > "
+  __fzf_rtfm_browse_apply "$man_rows" "$file_rows" "$show_prompt" "$q" "$mode" || return
 }
 
 fzf_tab_unified_impl() {

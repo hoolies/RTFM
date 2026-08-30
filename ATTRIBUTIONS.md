@@ -17,7 +17,6 @@ These programs are invoked by the plugin but are **separate projects** with thei
 | `man`, `col -b` | Manual pages and plaintext conversion |
 | `awk`, `sort`, `cut`, `find`, `file`, `head`, … | POSIX / common Unix utilities |
 | `timeout` (GNU coreutils or similar) | Optional bounded subprocess runs in diagnostics / `sv` probing |
-| `fd` (optional) | Faster file enumeration when installed |
 | Docker / iproute2 / runit | Their **help and man pages** are parsed at runtime (content © respective projects; programmatic reading only) |
 
 ## Documentation and standards consulted (inspiration, not copied code)
