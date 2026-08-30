@@ -1,8 +1,8 @@
+<h1 align="center">Read The <s>F@%$#!</s> Fuzzy Manual</h1>
+
 <p align="center">
   <img src="assets/fuzzy-manual.png" alt="A fuzzy, glowing book labeled MANUAL" width="320">
 </p>
-
-<h1 align="center">Read The <s>F@%$#!</s> Fuzzy Manual</h1>
 
 <p align="center"><strong>RTFM</strong>: a zsh plugin that finds command options, arguments, and paths from the real manual, blazingly fast.</p>
 
