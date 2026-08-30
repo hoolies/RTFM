@@ -1756,7 +1756,9 @@ __fzf_pick() {
 
 __fzf_zle_token_state() {
   typeset -g prefix_rest lastw nwords
-  setopt localoptions noshwordsplit extended_glob
+  # Avoid painting token-split locals onto the ZLE tty when xtrace is on.
+  builtin unsetopt xtrace verbose 2>/dev/null || true
+  setopt localoptions noshwordsplit extended_glob noxtrace noverbose
   local lb="$LBUFFER"
   local -a words
 
@@ -2687,12 +2689,89 @@ __fzf_apply_mixed_pick() {
   fi
 }
 
+# Turn off XTRACE and clear `functions -t` on RTFM helpers. Brace `2>/dev/null`
+# does not always hide xtrace in ZLE (xtrerr can stay on the tty).
+__fzf_rtfm_untrace() {
+  emulate -L zsh
+  builtin unsetopt xtrace verbose 2>/dev/null || true
+  local _f
+  for _f in fzf_tab_unified_impl __fzf_rtfm_browse_apply __fzf_tab_try_rtfm \
+    __fzf_pick_mixed __fzf_zle_token_state __fzf_get_cmd_and_sub \
+    __fzf_build_entries_cached __fzf_build_entries __fzf_rtfm_entries_to_man_rows \
+    __fzf_rtfm_tab_continue_rebuild __fzf_tab_immediate_file_rows \
+    __fzf_rtfm_cmd_wants_files __fzf_tab_path_token_dir_base \
+    __fzf_rtfm_path_only __fzf_rtfm_is_dir_prefix __fzf_rtfm_is_wrapper
+  do
+    functions +t "$_f" 2>/dev/null || true
+  done
+}
+
+# Tab-continue rebuild: write state files into $1 (outdir). No xtrace-visible
+# locals in the ZLE caller — that was dumping onto the prompt line above fzf.
+__fzf_rtfm_tab_continue_rebuild() {
+  emulate -L zsh
+  setopt noshwordsplit
+  __fzf_rtfm_untrace
+  functions +t __fzf_rtfm_tab_continue_rebuild 2>/dev/null || true
+  builtin unsetopt xtrace verbose 2>/dev/null || true
+
+  local out="$1" mode="$2" prompt="$3"
+  local parsed cmd sub man_rows use_man=0 list_mode show_prompt file_rows list_dir
+  local dir='.' base=''
+
+  man_rows=
+  list_mode="$mode"
+  show_prompt="$prompt"
+  file_rows=
+  list_dir='.'
+
+  if ! __fzf_rtfm_path_only; then
+    parsed="$(__fzf_get_cmd_and_sub)" || parsed=""
+    cmd="${parsed%%$'\t'*}"
+    sub="${parsed#*$'\t'}"
+    if [[ -n "$cmd" ]] && ! __fzf_rtfm_is_wrapper "$cmd"; then
+      if [[ "$cmd" == cd || "$cmd" == pushd ]]; then
+        man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
+        use_man=1
+        list_mode=dirs
+      elif man_rows="$(__fzf_build_entries_cached "$cmd" "$sub" "${LBUFFER}${RBUFFER}" 2>/dev/null | __fzf_rtfm_entries_to_man_rows "" "${LBUFFER}${RBUFFER}")"; then
+        [[ -n "$man_rows" ]] && use_man=1
+      fi
+      show_prompt="${cmd}${sub:+ $sub} > "
+      if [[ "$cmd" == cd || "$cmd" == pushd ]]; then
+        man_rows="$(print -r -- "$man_rows" | __fzf_rtfm_filter_used_line_tokens "${LBUFFER}${RBUFFER}")"
+      fi
+    fi
+  fi
+  if __fzf_rtfm_is_dir_prefix; then
+    list_mode=dirs
+  fi
+  __fzf_tab_path_token_dir_base
+  list_dir="$dir"
+  if [[ "$list_mode" == dirs ]] || __fzf_rtfm_path_only || [[ -n "$man_rows" ]]; then
+    if __fzf_rtfm_path_only || [[ "$list_mode" == dirs ]]; then
+      file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" "$list_mode" 1 1)"
+    elif __fzf_rtfm_cmd_wants_files "${cmd-}" "${sub-}"; then
+      file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" all 1 1)"
+    fi
+    [[ -n "$file_rows" ]] && file_rows="$(print -r -- "$file_rows" | __fzf_rtfm_filter_used_line_tokens "${LBUFFER}${RBUFFER}")"
+  fi
+
+  print -r -- "$man_rows" >"$out/man_rows"
+  print -r -- "$use_man" >"$out/use_man"
+  print -r -- "$list_mode" >"$out/list_mode"
+  print -r -- "$show_prompt" >"$out/show_prompt"
+  print -r -- "$file_rows" >"$out/file_rows"
+  print -r -- "$list_dir" >"$out/list_dir"
+}
+
 # ZLE-only (do not call from $(...)): listings are always depth 1. Tab on a
 # non-empty dir shows that directory’s immediate children; Tab on a file, option,
 # or empty dir inserts it and reopens the picker for the next token. Enter inserts
 # and returns to the shell. Alt-. toggles hidden names. Esc leaves the line as-is.
 __fzf_rtfm_browse_apply() {
-  # xtrace prints `_entries=$'…man…'` into the 90% gap above fzf on Tab-continue.
+  # xtrace prints assignments into the 90% gap above fzf on Tab-continue.
+  __fzf_rtfm_untrace
   setopt localoptions noshwordsplit noxtrace noverbose
   local man_rows="$1" file_rows="$2" prompt="$3" q="$4" mode="$5"
   local orig_man_rows="$man_rows"
@@ -2785,51 +2864,36 @@ __fzf_rtfm_browse_apply() {
     list_dir='.'
     list_depth=1
     list_mode="$mode"
-    # Rebuild options for the new line (e.g. docker → docker ps --all, not root again).
+    # Rebuild options for the new line (e.g. docker → docker ps --all).
+    # Run with fd 2 redirected: ZLE xtrace otherwise paints locals onto the
+    # prompt line above 90% fzf (`rb_cmd=ls`, `rb_sub=''`, …).
     man_rows=""
     use_man=0
     file_rows=""
-    if ! __fzf_rtfm_path_only; then
-      local _parsed _cmd _sub
-      _parsed="$(__fzf_get_cmd_and_sub)" || _parsed=""
-      _cmd="${_parsed%%$'\t'*}"
-      _sub="${_parsed#*$'\t'}"
-      if [[ -n "$_cmd" ]] && ! __fzf_rtfm_is_wrapper "$_cmd"; then
-        if [[ "$_cmd" == cd || "$_cmd" == pushd ]]; then
-          man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
-          use_man=1
-          list_mode=dirs
-        elif man_rows="$(__fzf_build_entries_cached "$_cmd" "$_sub" "${LBUFFER}${RBUFFER}" 2>/dev/null | __fzf_rtfm_entries_to_man_rows "" "${LBUFFER}${RBUFFER}")"; then
-          [[ -n "$man_rows" ]] && use_man=1
-        fi
-        show_prompt="${_cmd}${_sub:+ $_sub} > "
-      else
-        show_prompt="$prompt"
-      fi
-    else
-      show_prompt="$prompt"
+    show_prompt="$prompt"
+    list_mode="$mode"
+    list_dir='.'
+    local _rb_dir _rb_errfd=0
+    _rb_dir="$(command mktemp -d "${TMPDIR:-/tmp}/fzf-rtfm-rb.XXXXXX")" || _rb_dir=
+    if [[ -n "$_rb_dir" ]]; then
+      {
+        exec {_rb_errfd}>&2
+        exec 2>/dev/null
+        __fzf_rtfm_untrace
+        __fzf_rtfm_tab_continue_rebuild "$_rb_dir" "$mode" "$prompt"
+        man_rows="$(command cat -- "$_rb_dir/man_rows")"
+        use_man="$(command cat -- "$_rb_dir/use_man")"
+        list_mode="$(command cat -- "$_rb_dir/list_mode")"
+        show_prompt="$(command cat -- "$_rb_dir/show_prompt")"
+        file_rows="$(command cat -- "$_rb_dir/file_rows")"
+        list_dir="$(command cat -- "$_rb_dir/list_dir")"
+      } always {
+        (( _rb_errfd )) && exec 2>&$_rb_errfd && exec {_rb_errfd}>&-
+        command rm -rf -- "$_rb_dir"
+      }
     fi
-    # Already-chosen path args: drop them from the next file list.
-    if [[ "$_cmd" == cd || "$_cmd" == pushd ]]; then
-      man_rows="$(print -r -- "$man_rows" | __fzf_rtfm_filter_used_line_tokens "${LBUFFER}${RBUFFER}")"
-    fi
+    [[ "$use_man" == 1 ]] || use_man=0
     orig_man_rows="$man_rows"
-    if __fzf_rtfm_is_dir_prefix; then
-      list_mode=dirs
-    fi
-    __fzf_tab_path_token_dir_base
-    list_dir="$dir"
-    if [[ "$list_mode" == dirs ]] || __fzf_rtfm_path_only || [[ -n "$man_rows" ]]; then
-      # Paths when path-only, dir mode, or when usage may want files — refresh cwd listing.
-      if __fzf_rtfm_path_only || [[ "$list_mode" == dirs ]]; then
-        file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" "$list_mode" 1 1)"
-      else
-        if __fzf_rtfm_cmd_wants_files "${_cmd-}" "${_sub-}"; then
-          file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" all 1 1)"
-        fi
-      fi
-      [[ -n "$file_rows" ]] && file_rows="$(print -r -- "$file_rows" | __fzf_rtfm_filter_used_line_tokens "${LBUFFER}${RBUFFER}")"
-    fi
     continue
   done
 }
@@ -2933,6 +2997,9 @@ __fzf_tab_try_rtfm() {
 }
 
 fzf_tab_unified_impl() {
+  # Force tracing off for the whole Tab widget (localoptions alone is not
+  # enough when the function was marked with `functions -t`).
+  __fzf_rtfm_untrace
   setopt localoptions noshwordsplit extended_glob noxtrace noverbose
   __fzf_zle_token_state
   if __fzf_tab_completing_command_name && [[ -n "$lastw" ]] && __fzf_last_word_is_pathlike "$lastw"; then
@@ -2961,6 +3028,9 @@ fzf_rtfm_rebind_tab() {
 }
 
 zle -N fzf_tab_unified_widget fzf_tab_unified_impl
+
+# Drop function-trace flags left on from debug sessions (`functions -t …`).
+__fzf_rtfm_untrace
 
 bindkey '^I' fzf_tab_unified_widget
 bindkey -r '^[m' 2>/dev/null || true
