@@ -7,7 +7,7 @@ A **zsh** plugin that binds **Tab (`^I`)** to a two-phase widget: complete the c
 ## What it does (short)
 
 - **First word, no space yet:** Tab completes **PATH executables and shell builtins**. One prefix match is inserted with a space; several matches open **fzf** (history frequency, then alphabetical). An empty line opens the full command list.
-- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path. A token starting with `-` is options only. Typing a directory (`src/`) lists that directory one level at a time. **Tab** on a directory keeps fzf open on that directory’s children; **Enter** inserts the pick and returns to the prompt; **Esc** aborts.
+- **After a space** following the real command: Tab opens **fzf** with man/--help tokens first, then the current directory’s immediate files and subdirectories when the usage text looks like it takes a path (cwd lists also include **`/`**). A token starting with `-` is options only. Typing a directory (`src/`, `/`) lists **directories only at depth 1** and hides man options/arguments. **Tab** on a non-empty directory shows that directory’s immediate children (depth 1 again; files+dirs for path commands; dirs only for `cd`/`pushd`). Empty directory: insert with a trailing space. Parent `..` entries are not listed. **Alt-.** toggles hidden names (shown by default; fzf cannot bind Ctrl-.); **Enter** inserts the pick and returns to the prompt; **Esc** aborts.
 - Wrappers (`sudo`, `doas`, `command`, `builtin`, `env`, `time`, `nice`, `nohup`) are skipped so Tab sees the real command.
 - Special parsers: **`ip`**, **`docker`**, **`sv`** (runit).
 
@@ -63,18 +63,19 @@ fzf_rtfm_rebind_tab
 
 ## Keys and `fzf` UI
 
-- **Tab (`^I`)** — first word (no trailing space): `$PATH` + builtins (`gi<Tab>` unique insert, else fzf). After a space: man/--help tokens, then immediate files/dirs when usage looks like it takes a path. `-` tokens are options only. A typed directory (`src/`) lists that directory one level deep.
+- **Tab (`^I`)** — first word (no trailing space): `$PATH` + builtins (`gi<Tab>` unique insert, else fzf). After a space: man/--help tokens, then cwd files/dirs (one level) when usage looks like it takes a path. `-` tokens are options only. A typed directory (`src/`, `/`) lists directories only at depth 1; Tab steps one level into a directory or selects a file.
 - **Alt-m** — not bound (Tab only)
 
 Inside **fzf**:
 
 - Move: arrows, **Ctrl-j** / **Ctrl-k**
 - Scroll preview: **Left/Right** or **Ctrl-h** / **Ctrl-l**
-- **Tab** — directory: stay in fzf and list that directory’s children. File or man token: insert and return to the prompt
+- **Tab** — non-empty directory: show that directory’s immediate children (depth 1). Empty directory: insert it with a trailing space (ready for the next arg, e.g. `mv /src /dst`). File or man token: insert and return to the prompt
+- **Alt-.** — toggle hidden names (dotfiles); on by default. fzf cannot bind Ctrl-.
 - **Enter** — insert the current pick and return to the prompt (does not run the command)
 - **Esc** — abort without changing the command line
 
-Preview column shows descriptions; fuzzy search targets the **token** column (where applicable).
+Preview column shows man descriptions, or for paths: `ls -ld` plus file contents (directories list their children). **Ctrl-h** / **Ctrl-l** (and Left/Right) scroll the preview. Fuzzy search targets the **token** column.
 
 ---
 
@@ -218,6 +219,10 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 - **`__fzf_tab_path_token_dir_base`** — Derives **`dir`** + **`base`** from **`lastw`** / optional path fragment; expands leading `~`.
 - **`__fzf_tab_apply_merged_hist_path_pick`** — Decodes **`h<TAB>…`** vs **`p<TAB>…`** rows from merged list.
 - **`__fzf_last_word_is_pathlike`** — Heuristic: `/*`, `./`, `../`, `~*`, `*/*`.
+- **`__fzf_rtfm_list_depth`** — Always `1` (one-level listings).
+- **`__fzf_rtfm_is_dir_prefix`** — True when **`lastw`** is a directory path (`src/`, `/`, existing dir).
+- **`__fzf_rtfm_dir_has_entries`** — True if a directory has children the picker would show.
+- **`__fzf_tab_immediate_file_rows`** — Files/dirs under a listing root (`mode` all or dirs; depth and hidden flag).
 - **`__fzf_expect_path_arg`** — Previous word is a “path verb” (`cp`, `mv`, …) but not `cd`/`pushd`.
 - **`__fzf_tab_is_command_position`** — Empty line or sole **`sudo`** prefix.
 - **`__fzf_tab_first_cmd_word_after_modifiers`** — Walks **`builtin`/`command`**; sets **`REPLY`** to real command word.
@@ -252,7 +257,7 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 
 ### RTFM from tab dispatcher
 
-- **`__fzf_rtfm_browse_apply`** — Mixed path/man picker (ZLE only, not `$(…)`): **Tab** on a dir reloads that directory’s children in the same fzf; **Tab** on a file/option inserts; **Enter** inserts and returns to the prompt; **Esc** leaves the line unchanged.
+- **`__fzf_rtfm_browse_apply`** — Mixed path/man picker (ZLE only, not `$(…)`): **Tab** on a non-empty dir shows its immediate children; empty dir inserts with a trailing space; **Alt-.** toggles hidden names; **Tab** on a file/option inserts; **Enter** inserts and returns to the prompt; **Esc** leaves the line unchanged.
 - **`__fzf_tab_try_rtfm`** — Parses cmd/sub, **`__fzf_build_entries`**, **`__fzf_rtfm_browse_apply`**.
 
 ### Widget entrypoints

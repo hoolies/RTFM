@@ -29,14 +29,18 @@
 # Use a real path (container / remote workspace paths may differ from ~/... on the host).
 # Tab:
 # - First word with no trailing space (or an empty line): $PATH executables + builtins.
-#   Path-shaped first token (./, ../, /..., ~/): list that directory’s immediate files/dirs, not PATH.
+#   Path-shaped first token (./, ../, /..., ~/): list that directory (not PATH).
 #   Exact prefix match of one name inserts "name ". Several matches: fzf (history then alphabetical).
 # - After a space following the real command: man/--help tokens, then cwd files/dirs when usage
 #   looks like it takes a path. Token starting with "-" is options only.
 # - cd/pushd after a space: zsh -L/-P, "..", then directories only (not Tcl man / man -k ^cd-).
-# - Typed directory prefix (src/, ../): list that directory’s immediate children. Tab on a
-#   directory keeps fzf open and lists that directory’s children. Tab on a file or man token
-#   inserts it. Enter inserts the current pick and leaves you on the line. Esc leaves the line unchanged.
+# - Cwd with no directory prefix: one-level files/dirs (plus /) mixed with man options.
+#   Typed directory (src/, /): paths only (no man options/args), directories only at depth 1.
+#   Tab into a non-empty directory: show that directory’s immediate children (depth 1 again;
+#   files+dirs for path cmds; dirs only for cd/pushd). Empty dir: insert with trailing space.
+#   / stays dirs-only. No .. entries. Alt-. toggles hidden names (fzf cannot bind Ctrl-.).
+#   Tab on a file or man token inserts it. Enter inserts the current pick and leaves you on the line.
+#   Esc leaves the line unchanged.
 # - Wrappers skipped: sudo doas command builtin env time nice nohup
 # - Special parsers: ip, docker, sv (then files by the same usage rule)
 # - No Alt-m bind. One picker per Tab (directory Tab stays inside that picker).
@@ -55,7 +59,8 @@
 #   * Keymaps:
 #       arrows / Ctrl-J / Ctrl-K to move
 #       Left/Right or Ctrl-H/Ctrl-L to scroll preview up/down
-#       Tab: descend into a directory (fzf stays open); accept a file/option
+#       Tab: enter a non-empty directory (depth 1); accept an empty directory with a trailing space
+#       Alt-.: toggle hidden names (dotfiles; fzf cannot bind Ctrl-.)
 #       Enter: accept the current pick and return to the prompt (does not run)
 #       Esc: abort without modifying the command line
 #
@@ -1442,38 +1447,114 @@ __fzf_last_word_is_pathlike() {
   [[ "$w" == /* || "$w" == ./ || "$w" == ./* || "$w" == ../ || "$w" == ../* || "$w" == '~'* || "$w" == */* ]]
 }
 
+# Path listings are always one level deep.
+__fzf_rtfm_list_depth() {
+  print -r -- 1
+}
+
+# True when the current token is already a directory path (src/, /, ~/…).
+__fzf_rtfm_is_dir_prefix() {
+  setopt localoptions noshwordsplit
+  local w="$lastw" exp
+  [[ -n "$w" ]] || return 1
+  # Explicit forms first — do not rely on glob `*/` alone for root `/`.
+  case "$w" in
+    / | */ | ./ | ../) return 0 ;;
+  esac
+  exp="$w"
+  [[ "$exp" == '~'* ]] && exp="${~exp}"
+  [[ -d "$exp" ]]
+}
+
+# True when the token is path-shaped: hide man options/args and show paths only.
+__fzf_rtfm_path_only() {
+  setopt localoptions noshwordsplit
+  [[ -n "$lastw" ]] || return 1
+  __fzf_rtfm_is_dir_prefix && return 0
+  __fzf_last_word_is_pathlike "$lastw"
+}
+
+# True if $1 has entries that the picker would show (mode $2, hidden $3).
+__fzf_rtfm_dir_has_entries() {
+  setopt localoptions noshwordsplit
+  local d="$1" mode="${2:-all}" hidden="${3:-1}" first
+  [[ -d "$d" ]] || return 1
+  if [[ "$d" == / ]]; then
+    if [[ "$hidden" == 1 ]]; then
+      first="$(command find / -mindepth 1 -maxdepth 1 \
+        \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \
+        \( -type d -o -type l \) -print 2>/dev/null | command head -n 1)"
+    else
+      first="$(command find / -mindepth 1 -maxdepth 1 \
+        \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name '.*' \) -prune -o \
+        \( -type d -o -type l \) -print 2>/dev/null | command head -n 1)"
+    fi
+  elif [[ "$mode" == dirs ]]; then
+    if [[ "$hidden" == 1 ]]; then
+      first="$(command find "$d" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) 2>/dev/null | command head -n 1)"
+    else
+      first="$(command find "$d" -mindepth 1 -maxdepth 1 \
+        \( -name '.*' -prune -o \( -type d -o -type l \) -print \) 2>/dev/null | command head -n 1)"
+    fi
+    [[ -n "$first" && -d "$first" ]] || return 1
+    return 0
+  elif [[ "$hidden" == 1 ]]; then
+    first="$(command find "$d" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null | command head -n 1)"
+  else
+    first="$(command find "$d" -mindepth 1 -maxdepth 1 \
+      \( -name '.*' -prune -o \( -type f -o -type d -o -type l \) -print \) 2>/dev/null | command head -n 1)"
+  fi
+  [[ -n "$first" ]]
+}
+
 __fzf_tab_immediate_file_rows() {
   setopt localoptions noshwordsplit
-  local dir="$1" mode="${2:-all}" p name
+  local dir="$1" mode="${2:-all}" depth="${3:-1}" hidden="${4:-1}" p name
   [[ -d "$dir" ]] || return 0
+  [[ "$depth" == <-> ]] || depth=1
   local keep_dotslash=0
   [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
-  # Parent dir so cd in a leaf folder (only .git, etc.) can still go up.
-  if [[ "$dir" != / ]]; then
-    local up
-    if [[ "$dir" == . || "$dir" == ./ ]]; then
-      if (( keep_dotslash )); then
-        up='../'
-      else
-        up='..'
-      fi
-    else
-      up="${dir%/}/.."
-    fi
-    print -r -- "$up"$'\tf\t'
+  # Offer / from cwd so cat/cd Tab can enter the root without typing it.
+  if [[ "$dir" == . || "$dir" == ./ ]]; then
+    print -r -- "/"$'\tf\t'
   fi
   {
-    if [[ "$mode" == dirs ]]; then
-      command find "$dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \)
+    if [[ "$dir" == / ]]; then
+      # Root: directories only; skip virtual filesystems.
+      if [[ "$hidden" == 1 ]]; then
+        command find / -mindepth 1 -maxdepth "$depth" \
+          \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \
+          \( -type d -o -type l \) -print
+      else
+        command find / -mindepth 1 -maxdepth "$depth" \
+          \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name '.*' \) -prune -o \
+          \( -type d -o -type l \) -print
+      fi
+    elif [[ "$hidden" == 1 ]]; then
+      if [[ "$mode" == dirs ]]; then
+        command find "$dir" -mindepth 1 -maxdepth "$depth" \( -type d -o -type l \)
+      else
+        command find "$dir" -mindepth 1 -maxdepth "$depth" \( -type f -o -type d -o -type l \)
+      fi
     else
-      command find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \)
+      if [[ "$mode" == dirs ]]; then
+        command find "$dir" -mindepth 1 -maxdepth "$depth" \
+          \( -name '.*' -prune -o \( -type d -o -type l \) -print \)
+      else
+        command find "$dir" -mindepth 1 -maxdepth "$depth" \
+          \( -name '.*' -prune -o \( -type f -o -type d -o -type l \) -print \)
+      fi
     fi
   } 2>/dev/null | command sort | while IFS= read -r p; do
       [[ -z "$p" ]] && continue
-      if [[ "$mode" == dirs ]] && [[ ! -d "$p" ]]; then
+      if [[ "$mode" == dirs || "$dir" == / ]] && [[ ! -d "$p" ]]; then
         continue
       fi
       name="${p#./}"
+      # Never offer . / .. / path/.. as picks.
+      case "$name" in
+        . | .. | */. | */..) continue ;;
+      esac
       if (( keep_dotslash )); then
         [[ "$name" == ./* ]] || name="./$name"
       fi
@@ -1485,10 +1566,11 @@ __fzf_tab_try_path_firstword() {
   setopt localoptions noshwordsplit
   [[ -n "$lastw" ]] || return 1
   __fzf_last_word_is_pathlike "$lastw" || return 1
-  local dir base q file_rows
+  local dir base q file_rows list_mode=all
   dir='.' base=''
   __fzf_tab_path_token_dir_base
-  file_rows="$(__fzf_tab_immediate_file_rows "$dir" all)"
+  __fzf_rtfm_is_dir_prefix && list_mode=dirs
+  file_rows="$(__fzf_tab_immediate_file_rows "$dir" "$list_mode" 1 1)"
   [[ -n "$file_rows" ]] || { zle redisplay; return 0; }
   q="$base"
   __fzf_rtfm_browse_apply "" "$file_rows" 'path> ' "$q" all || return
@@ -1497,25 +1579,63 @@ __fzf_tab_try_path_firstword() {
 __fzf_pick_mixed() {
   local entries="$1" prompt="$2" query="${3-}"
   local with_expect="${4-}"
-  local mode="${5:-all}"
-  local selection fzf_ec=0 ps state lister transformer
+  local zoom_mode="${5:-all}"
+  local list_dir="${6:-.}"
+  local list_depth="${7:-1}"
+  local man_rows="${8-}"
+  local list_mode="${9:-$zoom_mode}"
+  local selection fzf_ec=0 ps state lister transformer toggler manfile
   local -a qopts=() expect_opts=() bind_opts=()
   local keep_dotslash=0
   [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
   [[ -n "$query" ]] && qopts=(--query="$query")
+  [[ -d "$list_dir" ]] || list_dir='.'
+  [[ "$list_depth" == <-> ]] || list_depth=1
+  [[ "$list_mode" == dirs || "$list_mode" == all ]] || list_mode="$zoom_mode"
+  [[ "$zoom_mode" == dirs || "$zoom_mode" == all ]] || zoom_mode=all
+  list_depth=1
   ps=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-prev.XXXXXX")
   state=
   lister=
   transformer=
+  toggler=
+  manfile=
   {
     print -r '#!/bin/sh'
     print -r 'line=$1'
     print -r 'kind=$(printf %s "$line" | cut -f2)'
     print -r 'tok=$(printf %s "$line" | cut -f1)'
     print -r 'desc=$(printf %s "$line" | cut -f3-)'
-    print -r 'if [ "$kind" = f ]; then ls -ld -- "$tok" 2>/dev/null'
-    print -r 'else printf "%s\n" "$desc"'
+    print -r 'if [ "$kind" != f ]; then'
+    print -r '  printf "%s\n" "$desc"'
+    print -r '  exit 0'
     print -r 'fi'
+    print -r 'ls -ld -- "$tok" 2>/dev/null'
+    print -r 'if [ -d "$tok" ]; then'
+    print -r '  printf "\n"'
+    print -r '  ls -la -- "$tok" 2>/dev/null | head -n 80'
+    print -r '  exit 0'
+    print -r 'fi'
+    print -r 'if [ ! -e "$tok" ] && [ ! -L "$tok" ]; then'
+    print -r '  exit 0'
+    print -r 'fi'
+    print -r 'printf "\n"'
+    print -r 'mime='
+    print -r 'if command -v file >/dev/null 2>&1; then'
+    print -r '  mime=$(file -b --mime-type -- "$tok" 2>/dev/null || true)'
+    print -r 'fi'
+    print -r 'case "$mime" in'
+    print -r '  ""|text/*|*empty*|inode/x-empty|application/json|application/xml|application/javascript|application/x-sh|application/x-shellscript|application/x-csh|application/toml|application/yaml|application/x-yaml|application/sql)'
+    print -r '    head -n 500 -- "$tok" 2>/dev/null'
+    print -r '    ;;'
+    print -r '  *)'
+    print -r '    if command -v file >/dev/null 2>&1; then'
+    print -r '      file -- "$tok" 2>/dev/null'
+    print -r '    else'
+    print -r '      printf "(binary or non-text file)\n"'
+    print -r '    fi'
+    print -r '    ;;'
+    print -r 'esac'
   } >"$ps"
   command chmod +x "$ps"
 
@@ -1523,37 +1643,76 @@ __fzf_pick_mixed() {
     state=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-nav.XXXXXX")
     lister=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-ls.XXXXXX")
     transformer=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-tr.XXXXXX")
-    : >"$state"
+    toggler=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-tg.XXXXXX")
+    manfile=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-man.XXXXXX")
+    {
+      print -r -- "$list_dir"
+      print -r -- 1
+      print -r -- "$list_depth"
+      if [[ -n "$man_rows" ]]; then
+        print -r -- 1
+      else
+        print -r -- 0
+      fi
+      print -r -- "$list_mode"
+    } >"$state"
+    if [[ -n "$man_rows" ]]; then
+      print -r -- "$man_rows" >"$manfile"
+    else
+      : >"$manfile"
+    fi
     {
       print -r '#!/bin/sh'
       print -r "statefile='$state'"
-      print -r "mode='$mode'"
+      print -r "manfile='$manfile'"
       print -r "keep_dotslash='$keep_dotslash'"
-      print -r 'dir=$(cat "$statefile")'
-      print -r '[ -n "$dir" ] || exit 0'
-      print -r '[ -d "$dir" ] || exit 0'
-      print -r 'if [ "$dir" != / ]; then'
-      print -r '  if [ "$dir" = . ] || [ "$dir" = ./ ]; then'
-      print -r '    if [ "$keep_dotslash" = 1 ]; then'
-      print -r "      up='../'"
-      print -r '    else'
-      print -r "      up='..'"
-      print -r '    fi'
-      print -r '  else'
-      print -r '    up="${dir%/}/.."'
-      print -r '  fi'
-      print -r $'  printf \'%s\\tf\\t\\n\' "$up"'
+      print -r 'dir=$(sed -n "1p" "$statefile")'
+      print -r 'hidden=$(sed -n "2p" "$statefile")'
+      print -r 'depth=$(sed -n "3p" "$statefile")'
+      print -r 'show_man=$(sed -n "4p" "$statefile")'
+      print -r 'mode=$(sed -n "5p" "$statefile")'
+      print -r '[ -n "$dir" ] || dir=.'
+      print -r '[ -n "$hidden" ] || hidden=1'
+      print -r '[ -n "$depth" ] || depth=1'
+      print -r 'case "$depth" in'
+      print -r '  *[!0-9]*|"") depth=1 ;;'
+      print -r 'esac'
+      print -r '[ -n "$show_man" ] || show_man=0'
+      print -r '[ -n "$mode" ] || mode=all'
+      print -r 'if [ "$show_man" = 1 ] && [ -s "$manfile" ]; then'
+      print -r '  cat "$manfile"'
       print -r 'fi'
-      print -r 'if [ "$mode" = dirs ]; then'
-      print -r '  find "$dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \)'
+      print -r '[ -d "$dir" ] || exit 0'
+      print -r 'if [ "$dir" = . ] || [ "$dir" = ./ ]; then'
+      print -r $'  printf \'/\\tf\\t\\n\''
+      print -r 'fi'
+      print -r 'if [ "$dir" = / ]; then'
+      print -r '  if [ "$hidden" = 1 ]; then'
+      print -r '    find / -mindepth 1 -maxdepth "$depth" \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print'
+      print -r '  else'
+      print -r '    find / -mindepth 1 -maxdepth "$depth" \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print'
+      print -r '  fi'
+      print -r 'elif [ "$hidden" = 1 ]; then'
+      print -r '  if [ "$mode" = dirs ]; then'
+      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -type d -o -type l \)'
+      print -r '  else'
+      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -type f -o -type d -o -type l \)'
+      print -r '  fi'
       print -r 'else'
-      print -r '  find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \)'
+      print -r '  if [ "$mode" = dirs ]; then'
+      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -name ".*" -prune -o \( -type d -o -type l \) -print \)'
+      print -r '  else'
+      print -r '    find "$dir" -mindepth 1 -maxdepth "$depth" \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \)'
+      print -r '  fi'
       print -r 'fi 2>/dev/null | sort | while IFS= read -r p; do'
       print -r '  [ -z "$p" ] && continue'
-      print -r '  if [ "$mode" = dirs ] && [ ! -d "$p" ]; then'
+      print -r '  if { [ "$mode" = dirs ] || [ "$dir" = / ]; } && [ ! -d "$p" ]; then'
       print -r '    continue'
       print -r '  fi'
       print -r '  name=${p#./}'
+      print -r '  case "$name" in'
+      print -r '    .|..|*/.|*/..) continue ;;'
+      print -r '  esac'
       print -r '  if [ "$keep_dotslash" = 1 ]; then'
       print -r '    case "$name" in'
       print -r '      ./*) ;;'
@@ -1567,19 +1726,69 @@ __fzf_pick_mixed() {
       print -r '#!/bin/sh'
       print -r "statefile='$state'"
       print -r "lister='$lister'"
+      print -r "zoom_mode='$zoom_mode'"
       print -r 'tok=$1'
+      print -r 'hidden=$(sed -n "2p" "$statefile")'
+      print -r 'mode=$(sed -n "5p" "$statefile")'
+      print -r '[ -n "$hidden" ] || hidden=1'
+      print -r '[ -n "$mode" ] || mode=all'
+      print -r '[ -n "$zoom_mode" ] || zoom_mode=all'
+      print -r 'has_entries=0'
+      print -r '# Use zoom_mode: after Tab the listing switches to that mode.'
+      print -r 'check_mode=$zoom_mode'
+      print -r '[ -n "$check_mode" ] || check_mode=$mode'
       print -r 'if [ -d "$tok" ]; then'
-      print -r '  printf "%s\n" "$tok" > "$statefile"'
+      print -r '  if [ "$tok" = / ]; then'
+      print -r '    if [ "$hidden" = 1 ]; then'
+      print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
+      print -r '    else'
+      print -r '      first=$(find / -mindepth 1 -maxdepth 1 \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -name ".*" \) -prune -o \( -type d -o -type l \) -print 2>/dev/null | head -n 1)'
+      print -r '    fi'
+      print -r '  elif [ "$check_mode" = dirs ]; then'
+      print -r '    if [ "$hidden" = 1 ]; then'
+      print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) 2>/dev/null | head -n 1)'
+      print -r '    else'
+      print -r '      first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
+      print -r '    fi'
+      print -r '    [ -n "$first" ] && [ -d "$first" ] || first='
+      print -r '  elif [ "$hidden" = 1 ]; then'
+      print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -type f -o -type d -o -type l \) 2>/dev/null | head -n 1)'
+      print -r '  else'
+      print -r '    first=$(find "$tok" -mindepth 1 -maxdepth 1 \( -name ".*" -prune -o \( -type f -o -type d -o -type l \) -print \) 2>/dev/null | head -n 1)'
+      print -r '  fi'
+      print -r '  [ -n "$first" ] && has_entries=1'
+      print -r 'fi'
+      print -r 'if [ -d "$tok" ] && [ "$has_entries" = 1 ]; then'
+      print -r '  { printf "%s\n" "$tok"; printf "%s\n" "$hidden"; printf "%s\n" 1; printf "%s\n" 0; printf "%s\n" "$zoom_mode"; } > "$statefile"'
       print -r '  printf "reload(%s)+clear-query\n" "$lister"'
       print -r 'else'
       print -r '  printf "accept\n"'
       print -r 'fi'
     } >"$transformer"
-    command chmod +x "$lister" "$transformer"
+    {
+      print -r '#!/bin/sh'
+      print -r "statefile='$state'"
+      print -r "lister='$lister'"
+      print -r 'dir=$(sed -n "1p" "$statefile")'
+      print -r 'hidden=$(sed -n "2p" "$statefile")'
+      print -r 'depth=$(sed -n "3p" "$statefile")'
+      print -r 'show_man=$(sed -n "4p" "$statefile")'
+      print -r 'mode=$(sed -n "5p" "$statefile")'
+      print -r '[ -n "$dir" ] || dir=.'
+      print -r '[ -n "$hidden" ] || hidden=1'
+      print -r '[ -n "$depth" ] || depth=1'
+      print -r '[ -n "$show_man" ] || show_man=0'
+      print -r '[ -n "$mode" ] || mode=all'
+      print -r 'if [ "$hidden" = 1 ]; then hidden=0; else hidden=1; fi'
+      print -r '{ printf "%s\n" "$dir"; printf "%s\n" "$hidden"; printf "%s\n" "$depth"; printf "%s\n" "$show_man"; printf "%s\n" "$mode"; } > "$statefile"'
+      print -r 'printf "reload(%s)\n" "$lister"'
+    } >"$toggler"
+    command chmod +x "$lister" "$transformer" "$toggler"
     expect_opts=(--expect=tab,enter)
     bind_opts=(
       "${__fzf_rtfm_fzf_binds_preview_nav[@]}"
       --bind "tab:transform:$transformer {1}"
+      --bind "alt-.:transform:$toggler"
     )
   else
     bind_opts=("${__fzf_rtfm_fzf_binds_preview[@]}")
@@ -1589,7 +1798,7 @@ __fzf_pick_mixed() {
   __fzf_mixed_fin() {
     ((__fzf_mixed_done)) && return 0
     __fzf_mixed_done=1
-    command rm -f "$ps" "$state" "$lister" "$transformer"
+    command rm -f "$ps" "$state" "$lister" "$transformer" "$toggler" "$manfile"
     __fzf_rtfm_zle_parent_tty_restore
     __fzf_tty_refreeze
   }
@@ -1662,18 +1871,33 @@ __fzf_apply_mixed_pick() {
   fi
 }
 
-# ZLE-only (do not call from $(...)): Tab on a dir reloads that directory’s
-# children in the same fzf (loop fallback if reload is unavailable). Tab on a
-# file/option inserts; Enter inserts and returns to the prompt; Esc leaves the line as-is.
+# ZLE-only (do not call from $(...)): listings are always depth 1. Tab on a
+# non-empty dir shows that directory’s immediate children; Tab on an empty dir
+# inserts it with a trailing space (next arg, e.g. mv /src /dst). Alt-. toggles
+# hidden names. Tab on a file/option inserts; Enter inserts and returns to the
+# prompt; Esc leaves the line as-is.
 __fzf_rtfm_browse_apply() {
   setopt localoptions noshwordsplit
   local man_rows="$1" file_rows="$2" prompt="$3" q="$4" mode="$5"
   local use_man=1
   local mixed raw rc key row kind tok
   local show_prompt="$prompt"
+  local dir='.' base='' list_dir list_depth list_mode
+  __fzf_tab_path_token_dir_base
+  list_dir="$dir"
+  list_depth=1
+  list_mode="$mode"
+  if __fzf_rtfm_is_dir_prefix; then
+    list_mode=dirs
+  fi
+  # Any path token: never mix man options/arguments into the picker.
+  if __fzf_rtfm_path_only; then
+    use_man=0
+    man_rows=""
+  fi
 
   while true; do
-    if (( use_man )); then
+    if (( use_man )) && [[ -n "$man_rows" ]]; then
       mixed="$(printf '%s\n%s\n' "$man_rows" "$file_rows" | command awk 'NF')"
     else
       mixed="$(printf '%s\n' "$file_rows" | command awk 'NF')"
@@ -1683,7 +1907,7 @@ __fzf_rtfm_browse_apply() {
       return 0
     fi
 
-    raw="$(__fzf_pick_mixed "$mixed" "$show_prompt" "$q" expect "$mode")"
+    raw="$(__fzf_pick_mixed "$mixed" "$show_prompt" "$q" expect "$mode" "$list_dir" "$list_depth" "$man_rows" "$list_mode")"
     rc=$?
     if (( rc == 2 )); then
       zle redisplay
@@ -1705,13 +1929,26 @@ __fzf_rtfm_browse_apply() {
     kind="${kind%%$'\t'*}"
     tok="${row%%$'\t'*}"
 
-    if [[ "$key" == tab && "$kind" == f && -n "$tok" && -d "$tok" ]]; then
-      lastw="${tok%/}/"
-      file_rows="$(__fzf_tab_immediate_file_rows "$tok" "$mode")"
-      use_man=0
-      q=""
-      show_prompt="${prompt}${tok%/}/"
-      continue
+    if [[ "$kind" == f && -n "$tok" && -d "$tok" ]]; then
+      if [[ "$key" == tab ]] && __fzf_rtfm_dir_has_entries "$tok" "$mode" 1; then
+        lastw="${tok%/}/"
+        list_dir="$tok"
+        list_depth=1
+        list_mode="$mode"
+        file_rows="$(__fzf_tab_immediate_file_rows "$tok" "$list_mode" 1 1)"
+        if [[ -n "$file_rows" ]]; then
+          use_man=0
+          man_rows=""
+          q=""
+          show_prompt="${prompt}${tok%/}/"
+          continue
+        fi
+      fi
+      # Empty directory (Tab/Enter/accept): insert with a trailing space for the next arg.
+      if ! __fzf_rtfm_dir_has_entries "$tok" "$mode" 1; then
+        __fzf_apply_pick "${tok%/}/"
+        return 0
+      fi
     fi
 
     __fzf_apply_mixed_pick "$row"
@@ -1748,34 +1985,54 @@ __fzf_tab_try_rtfm() {
   local man_rows=""
   local file_rows=""
 
+  local path_only=0 dir_only=0
+  __fzf_rtfm_path_only && path_only=1
+  __fzf_rtfm_is_dir_prefix && dir_only=1
+
   if [[ "$cmd" == cd || "$cmd" == pushd ]]; then
     # Do not use man cd (often Tcl) or man -k ^cd- (cd-paranoia as fake subcommands).
-    man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
+    # Path token: directories only (no -L/-P options).
+    if (( !path_only )); then
+      man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
+    fi
     if [[ "$lastw" != -* ]]; then
       dir='.' base=''
       __fzf_tab_path_token_dir_base
-      file_rows="$(__fzf_tab_immediate_file_rows "$dir" dirs)"
+      file_rows="$(__fzf_tab_immediate_file_rows "$dir" dirs 1 1)"
     fi
   else
-    if [[ -n "$entries" ]]; then
+    if (( !path_only )) && [[ -n "$entries" ]]; then
       man_rows="$(print -r -- "$entries" | command awk -F '\t' 'NF { print $1 "\tm\t" $2 }')"
+    else
+      man_rows=""
     fi
     if [[ "$lastw" != -* ]]; then
       docs="$(__fzf_rtfm_docs_text "$cmd" "$sub" 2>/dev/null)" || docs=""
-      if [[ -n "$docs" ]] && __fzf_rtfm_text_wants_files "$docs"; then
+      if (( path_only )) || { [[ -n "$docs" ]] && __fzf_rtfm_text_wants_files "$docs"; }; then
+        local list_mode=all
         dir='.' base=''
         __fzf_tab_path_token_dir_base
-        file_rows="$(__fzf_tab_immediate_file_rows "$dir" all)"
+        (( dir_only )) && list_mode=dirs
+        file_rows="$(__fzf_tab_immediate_file_rows "$dir" "$list_mode" 1 1)"
       fi
     fi
   fi
 
+  # Belt and suspenders: never pass options when the token is a path.
+  if (( path_only )); then
+    man_rows=""
+  fi
+
   local mixed
-  mixed="$(printf '%s\n%s\n' "$man_rows" "$file_rows" | command awk 'NF')"
+  if [[ -n "$man_rows" ]]; then
+    mixed="$(printf '%s\n%s\n' "$man_rows" "$file_rows" | command awk 'NF')"
+  else
+    mixed="$(printf '%s\n' "$file_rows" | command awk 'NF')"
+  fi
   [[ -n "$mixed" ]] || { zle redisplay; return 0; }
 
   q="$lastw"
-  if [[ "$lastw" == */* || "$lastw" == */ ]]; then
+  if [[ "$lastw" == / || "$lastw" == */* || "$lastw" == */ ]]; then
     q="$base"
   fi
 
