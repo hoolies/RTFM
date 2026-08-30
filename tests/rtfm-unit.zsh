@@ -212,6 +212,75 @@ assert_ok 'cwd list keeps src as both display and path' \
   'print -r -- "$cwd_rows" | command awk -F "\t" '\''$1=="src" && $3=="src" {found=1} END{exit !found}'\'''
 command rm -rf "$_td"
 
+# --- shared word split handles quotes; matches token state ---
+LBUFFER="git commit -m 'hello world' "
+__fzf_zle_token_state
+assert_ok 'quoted arg keeps lastw empty after trailing space' '[[ -z "$lastw" ]]'
+assert_ok 'quoted arg stays in prefix_rest' '[[ "$prefix_rest" == *"hello world"* ]]'
+_wsplit="$(__fzf_rtfm_wsplit "cmd -m 'a b'")"
+assert_ok 'wsplit keeps quoted phrase as one word' \
+  'print -r -- "$_wsplit" | command awk '\''BEGIN{n=0} NF{n++} END{exit !(n==3)}'\'''
+
+# --- untrace clears functions -t ---
+__fzf_rtfm_untrace_probe() { :; }
+functions -t __fzf_rtfm_untrace_probe
+__fzf_rtfm_untrace
+assert_ok 'untrace clears functions -t flag' \
+  '[[ -z "$(functions -t 2>/dev/null | command rg -F -- "__fzf_rtfm_untrace_probe" || true)" ]]'
+
+# --- Tab-continue rebuild writes expected state files ---
+_rb=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-rb.XXXXXX")
+LBUFFER='ls --author '
+lastw=''
+prefix_rest='ls --author'
+__fzf_rtfm_tab_continue_rebuild "$_rb" all 'ls > '
+assert_ok 'rebuild use_man is 1 for ls' '[[ "$(command cat -- "$_rb/use_man")" == 1 ]]'
+assert_ok 'rebuild man_rows drop used --author' \
+  '[[ "$(command cat -- "$_rb/man_rows")" != *"--author"* ]]'
+assert_ok 'rebuild show_prompt is ls' \
+  '[[ "$(command cat -- "$_rb/show_prompt")" == "ls > " ]]'
+command rm -rf "$_rb"
+
+_rb=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-rb.XXXXXX")
+mkdir -p "$_rb/fixture/src/nested" "$_rb/out"
+LBUFFER='cd src/'
+lastw='src/'
+prefix_rest='cd'
+( cd "$_rb/fixture" && __fzf_rtfm_tab_continue_rebuild "$_rb/out" dirs 'cd > ' )
+assert_ok 'rebuild cd src/ is dirs mode' '[[ "$(command cat -- "$_rb/out/list_mode")" == dirs ]]'
+assert_ok 'rebuild list_dir is src' \
+  '[[ "$(command cat -- "$_rb/out/list_dir")" == src || "$(command cat -- "$_rb/out/list_dir")" == src/ || "$(command cat -- "$_rb/out/list_dir")" == ./src ]]'
+command rm -rf "$_rb"
+
+# --- generated lister matches immediate_file_rows shape ---
+_td=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-lister.XXXXXX")
+mkdir -p "$_td/src/nested"
+print -r -- x >"$_td/src/file"
+_state=$(mktemp "${TMPDIR:-/tmp}/rtfm-st.XXXXXX")
+_man=$(mktemp "${TMPDIR:-/tmp}/rtfm-mn.XXXXXX")
+_lister=$(mktemp "${TMPDIR:-/tmp}/rtfm-ls.XXXXXX")
+{
+  print -r -- "$_td/src"
+  print -r -- 1
+  print -r -- 1
+  print -r -- 0
+  print -r -- all
+} >"$_state"
+: >"$_man"
+__fzf_rtfm_write_lister "$_lister" "$_state" "$_man" 0
+command chmod +x "$_lister"
+_lister_out="$("$_lister")"
+_imm_out="$(lastw='' && __fzf_tab_immediate_file_rows "$_td/src" all 1 1)"
+assert_ok 'lister shows basename file' \
+  'print -r -- "$_lister_out" | command awk -F "\t" '\''$1=="file" && $2=="f" {found=1} END{exit !found}'\'''
+assert_ok 'lister field 3 is full path' \
+  'print -r -- "$_lister_out" | command awk -F "\t" -v p="'"$_td/src/file"'" '\''$1=="file" && $3==p {found=1} END{exit !found}'\'''
+_expect=$'file\tf\t'"$_td/src/file"
+assert_ok 'lister and immediate_file_rows agree on file row' \
+  'print -r -- "$_lister_out" | command rg -F -- "$_expect" >/dev/null && print -r -- "$_imm_out" | command rg -F -- "$_expect" >/dev/null'
+command rm -rf "$_td"
+command rm -f "$_state" "$_man" "$_lister"
+
 # --- xtrace must not dump man entries above fzf ---
 _xt=$(mktemp "${TMPDIR:-/tmp}/rtfm-xt.XXXXXX")
 __fzf_rtfm_xtrace_quiet_probe() {

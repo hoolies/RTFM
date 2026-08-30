@@ -210,6 +210,10 @@ fzf_rtfm_diagnose        # paste output when debugging terminal/fzf/tty issues
 If Tab still runs only stock completion, call `fzf_rtfm_rebind_tab` at the end of `~/.zshrc`.  
 If typing in fzf fails inside tmux: `export FZF_RTFM_USE_TMUX=1`.
 
+### Debugging / xtrace
+
+Tab-continue rebuilds options in a helper with tracing forced off (`__fzf_rtfm_untrace`) and stderr redirected, so `set -x` / `functions -t` cannot paint locals onto the strip above 90% fzf. Man pages stay on disk during parse (not huge zsh scalars). After a debug session, re-source the plugin or run Tab once so untrace clears leftover `functions -t` flags.
+
 ---
 
 ## Repository layout
@@ -219,6 +223,7 @@ If typing in fzf fails inside tmux: `export FZF_RTFM_USE_TMUX=1`.
 | `fzf-man-opts.zsh` | Full implementation |
 | `rtfm` | One-line `source` of the implementation |
 | `rtfm.plugin.zsh` | Oh My Zsh-style loader |
+| `tests/rtfm-unit.zsh` | Non-interactive unit tests |
 | `ATTRIBUTIONS.md` | Credits, dependencies, inspiration |
 | `LICENSE` | MIT |
 
@@ -257,9 +262,11 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 - **`__fzf_rtfm_fzf_binds_preview` / `_preview_nav` / `_basic`** — Shared keymaps (include **`?`** help bind after load).
 - **`__fzf_rtfm_fzf_preview_window`** — `--preview-window` string (`right,80%,wrap`).
 - **`__fzf_rtfm_print_help` / `__fzf_rtfm_ensure_help_script`** — Help text and pager script for **`?`**.
-- **`__fzf_rtfm_ensure_preview_script` / `__fzf_rtfm_write_lister` / `_write_transformer` / `_write_toggler`** — Cached preview + shared in-fzf script generators.
+- **`__fzf_rtfm_ensure_preview_script` / `__fzf_rtfm_write_lister` / `_write_transformer` / `_write_toggler`** — Cached preview + shared in-fzf script generators (lister embeds `__fzf_rtfm_list_paths` / `_emit_file_row`).
 - **`__fzf_rtfm_resolve_path_pick`** — Join picks onto a typed directory prefix in `lastw`.
 - **`__fzf_rtfm_man_options_from_topic`** — OPTIONS-section-first man parse.
+- **`__fzf_rtfm_untrace`** — Clear `xtrace` / `functions -t` on RTFM helpers (auto-discovered by name).
+- **`__fzf_rtfm_tab_continue_rebuild`** — Tab-continue state rebuild into a temp dir (used under silenced stderr).
 
 ### TTY / terminal hygiene
 
@@ -300,9 +307,11 @@ Functions are **private** (`__fzf_*`) except the public helpers and widget entry
 
 ### Tab / path / picker layer
 
-- **`__fzf_zle_token_state`** — Globals `prefix_rest`, `lastw`, `nwords` from `LBUFFER`.
+- **`__fzf_zle_token_state`** — Globals `prefix_rest`, `lastw`, `nwords` from `LBUFFER` (via `__fzf_rtfm_wsplit`).
+- **`__fzf_rtfm_wsplit`** — Safe word split (`${(z)}` with space fallback; parse dumps silenced).
 - **`__fzf_apply_pick` / `__fzf_apply_dir_pick` / `__fzf_apply_mixed_pick`** — Insert tokens onto the line.
 - **`__fzf_rtfm_path_only` / `__fzf_rtfm_is_dir_prefix` / `__fzf_rtfm_dir_has_entries`** — Path-token gating.
+- **`__fzf_rtfm_list_paths` / `__fzf_rtfm_emit_file_row` / `__fzf_rtfm_row_apply_token` / `__fzf_rtfm_zoom_prompt`** — Shared path listing, basename display after zoom, apply/zoom helpers.
 - **`__fzf_tab_immediate_file_rows`** — Depth-1 file/dir rows (hidden flag, `/` special case).
 - **`__fzf_pick_mixed`** — Mixed man+path fzf (Tab/Enter expect, Alt-., Ctrl-f filter, `?` help).
 - **`__fzf_rtfm_browse_apply`** — ZLE loop: Tab stays open after insert; Enter returns to the shell; dir zoom.
