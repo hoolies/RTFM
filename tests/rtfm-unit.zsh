@@ -188,6 +188,45 @@ else
   print -r -- "skip- docker docs/preview tests"
 fi
 
+# --- zoomed listings show child names only ---
+_td=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-zoom.XXXXXX")
+mkdir -p "$_td/src/nested"
+print -r -- x >"$_td/src/file"
+lastw=''
+zoom_rows="$(__fzf_tab_immediate_file_rows "$_td/src" all 1 1)"
+assert_ok 'zoom list shows basename file' \
+  'print -r -- "$zoom_rows" | command awk -F "\t" '\''$1=="file" && $2=="f" {found=1} END{exit !found}'\'''
+assert_ok 'zoom list keeps full path in field 3' \
+  'print -r -- "$zoom_rows" | command awk -F "\t" -v p="'"$_td/src/file"'" '\''$1=="file" && $3==p {found=1} END{exit !found}'\'''
+assert_ok 'zoom list does not show parent/child in field 1' \
+  '[[ "$zoom_rows" != *$'\''\n'\''src/file$'\''\t'\''* && "$zoom_rows" != src/file$'\''\t'\''* ]]'
+_row=$'file\tf\t'"$_td/src/file"
+assert_ok 'row apply token uses full path' \
+  '[[ "$(__fzf_rtfm_row_apply_token "$_row")" == "'"$_td/src/file"'" ]]'
+assert_ok 'zoom prompt is current dir only' \
+  '[[ "$(__fzf_rtfm_zoom_prompt "'$_td'/src")" == "src/ > " ]]'
+assert_ok 'zoom prompt for root' \
+  '[[ "$(__fzf_rtfm_zoom_prompt /)" == "/ > " ]]'
+cwd_rows="$(cd "$_td" && lastw='' && __fzf_tab_immediate_file_rows . all 1 1)"
+assert_ok 'cwd list keeps src as both display and path' \
+  'print -r -- "$cwd_rows" | command awk -F "\t" '\''$1=="src" && $3=="src" {found=1} END{exit !found}'\'''
+command rm -rf "$_td"
+
+# --- xtrace must not dump man entries above fzf ---
+_xt=$(mktemp "${TMPDIR:-/tmp}/rtfm-xt.XXXXXX")
+__fzf_rtfm_xtrace_quiet_probe() {
+  setopt localoptions noxtrace noverbose
+  local _entries
+  _entries=$'--color[=WHEN]\tWHEN '\''always'\'' TIME_STYLE'
+}
+() {
+  setopt localoptions xtrace
+  __fzf_rtfm_xtrace_quiet_probe
+} 2>"$_xt"
+assert_ok 'noxtrace hides _entries assignment' \
+  '! command rg -q -- "TIME_STYLE|always" "$_xt"'
+command rm -f "$_xt"
+
 # --- path scheme / help / preview ---
 assert_ok 'path scheme array is declared' '[[ -n "${__fzf_rtfm_merged_path_scheme+x}" ]]'
 assert_ok 'help script executable' '[[ -x "$__fzf_rtfm_help_script" ]]'

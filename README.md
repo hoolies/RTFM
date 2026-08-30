@@ -34,6 +34,7 @@ Details on sources and tools: **[ATTRIBUTIONS.md](ATTRIBUTIONS.md)**.
 ### Path browsing
 
 - Listings are always **depth 1** (one level at a time).
+- After Tab-zoom into a directory, the list shows **child names only** (not `parent/child`). Insert still uses the full path.
 - Typed directory (`src/`, `/`, existing dir) → **directories only**, **no** man options/arguments.
 - **`/`** listing skips `/proc`, `/sys`, `/dev`, `/run`.
 - Parent **`..`** entries are never listed.

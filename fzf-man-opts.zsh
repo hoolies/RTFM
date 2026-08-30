@@ -37,8 +37,9 @@
 # - cd/pushd after a space: zsh -L/-P, then directories only (not Tcl man / man -k ^cd-). No .. entries.
 # - Cwd with no directory prefix: one-level files/dirs (plus /) mixed with man options.
 #   Typed directory (src/, /): paths only (no man options/args), directories only at depth 1.
-#   Tab into a non-empty directory: show that directory’s immediate children (depth 1 again;
-#   files+dirs for path cmds; dirs only for cd/pushd). Empty dir: insert with trailing space.
+#   Tab into a non-empty directory: show that directory's immediate children as
+#   names only (not parent/child); insert still uses the full path. Depth 1 again;
+#   files+dirs for path cmds; dirs only for cd/pushd. Empty dir: insert with trailing space.
 #   / stays dirs-only. No .. entries. Alt-. toggles hidden names (fzf cannot bind Ctrl-.).
 #   Tab on a file/option/empty-dir inserts it and keeps the picker open for the next token.
 #   Enter inserts the current pick and returns to the shell prompt. Esc leaves the line unchanged.
@@ -135,6 +136,10 @@ if command fzf --help 2>/dev/null | command rg -q -- '--with-shell' 2>/dev/null;
 fi
 
 __fzf_rtfm_fzf_exec() {
+  # Child preview/transform must not inherit SHELL=zsh (quote dumps) or a
+  # user FZF preview that interpolates the full line.
+  local -x SHELL=/bin/sh
+  local -x FZF_DEFAULT_OPTS="${FZF_DEFAULT_OPTS-}"
   if [[ ${FZF_RTFM_USE_TMUX-0} != 0 ]] && [[ -n ${TMUX_PANE-} ]] && command -v fzf-tmux >/dev/null 2>&1; then
     if [[ -n ${FZF_RTFM_TMUX_OPTS-} ]]; then
       # zsh ${=var}: word-split into argv for fzf-tmux; quoted form would pass a single token
@@ -224,9 +229,10 @@ HOW TO USE
 KEYS INSIDE FZF
   arrows / Ctrl-j / Ctrl-k   Move selection
   Left/Right or Ctrl-h/l     Scroll the preview pane
-  Tab                        Non-empty directory: zoom into it (depth 1).
-                             File, option, or empty directory: insert it
-                             and keep the picker open for the next token.
+  Tab                        Non-empty directory: zoom into it (depth 1;
+                             list child names only). File, option, or
+                             empty directory: insert it and keep the
+                             picker open for the next token.
   Enter                      Insert the current pick and return to the shell
                              (does not run the command).
   Esc                        Abort and leave the command line unchanged.
@@ -346,7 +352,8 @@ if [[ -n "$__fzf_rtfm_preview_script" ]]; then
 fi
 __fzf_rtfm_ensure_preview_script
 
-# Write the in-fzf path lister (full paths from find; keeps zoom/preview/insert correct).
+# Write the in-fzf path lister. Field 1 is the name shown in fzf (basename
+# after zoom); field 3 is the full path for preview/insert.
 __fzf_rtfm_write_lister() {
   local out="$1" state="$2" manfile="$3" keep_dotslash="$4"
   {
@@ -372,7 +379,7 @@ __fzf_rtfm_write_lister() {
     print -r 'fi'
     print -r '[ -d "$dir" ] || exit 0'
     print -r 'if [ "$dir" = . ] || [ "$dir" = ./ ]; then'
-    print -r $'  printf \'/\\tf\\t\\n\''
+    print -r $'  printf \'/\\tf\\t/\\n\''
     print -r 'fi'
     print -r 'if [ "$dir" = / ]; then'
     print -r '  if [ "$hidden" = 1 ]; then'
@@ -410,7 +417,12 @@ __fzf_rtfm_write_lister() {
     print -r '      *) name="./$name" ;;'
     print -r '    esac'
     print -r '  fi'
-    print -r $'  printf \'%s\\tf\\t\\n\' "$name"'
+    print -r '  display=$name'
+    print -r '  if [ "$dir" != . ] && [ "$dir" != ./ ]; then'
+    print -r '    display=${name##*/}'
+    print -r '    [ -n "$display" ] || display=$name'
+    print -r '  fi'
+    print -r $'  printf \'%s\\tf\\t%s\\n\' "$display" "$name"'
     print -r 'done'
   } >"$out"
 }
@@ -428,6 +440,16 @@ __fzf_rtfm_write_transformer() {
     [[ -n "$filterfile" ]] && print -r "filterfile='$filterfile'"
     [[ -n "$promptfile" ]] && print -r "promptfile='$promptfile'"
     print -r 'tok=$1'
+    print -r 'dir=$(sed -n "1p" "$statefile")'
+    print -r '[ -n "$dir" ] || dir=.'
+    print -r 'if [ ! -d "$tok" ]; then'
+    print -r '  case "$dir" in'
+    print -r '    /) cand="/$tok" ;;'
+    print -r '    .|./) cand="$tok" ;;'
+    print -r '    *) cand="$dir/${tok#./}" ;;'
+    print -r '  esac'
+    print -r '  [ -d "$cand" ] && tok=$cand'
+    print -r 'fi'
     print -r 'hidden=$(sed -n "2p" "$statefile")'
     print -r 'mode=$(sed -n "5p" "$statefile")'
     print -r '[ -n "$hidden" ] || hidden=1'
@@ -463,11 +485,13 @@ __fzf_rtfm_write_transformer() {
       print -r '  : > "$searchstate"'
       print -r '  : > "$filterfile"'
     fi
-    print -r '  zoom_hdr=$(printf %s "$tok" | tr "()\n\t" "[]  ")'
+    print -r '  if [ "$tok" = / ]; then zoom_base=/; else zoom_base=${tok##*/}/; fi'
+    print -r '  [ -n "$zoom_base" ] || zoom_base=$tok'
+    print -r '  zoom_hdr=$(printf %s "$zoom_base" | tr "()\n\t" "[]  ")'
     if [[ -n "$promptfile" ]]; then
-      print -r '  printf "reload(%s)+clear-query+enable-search+unbind(n)+unbind(N)+unbind(p)+change-header()+change-prompt(%s/ > )\n" "$lister" "$zoom_hdr"'
+      print -r '  printf "reload(%s)+clear-query+enable-search+unbind(n)+unbind(N)+unbind(p)+change-header()+change-prompt(%s > )\n" "$lister" "$zoom_hdr"'
     else
-      print -r '  printf "reload(%s)+clear-query+unbind(n)+unbind(N)+unbind(p)+change-header()+change-prompt(%s/ > )\n" "$lister" "$zoom_hdr"'
+      print -r '  printf "reload(%s)+clear-query+unbind(n)+unbind(N)+unbind(p)+change-header()+change-prompt(%s > )\n" "$lister" "$zoom_hdr"'
     fi
     print -r 'else'
     print -r '  printf "accept\n"'
@@ -1189,7 +1213,8 @@ __fzf_sv_should_offer_services() {
   local line="$1"
   [[ -z "$line" ]] && return 1
   setopt localoptions noshwordsplit
-  local words=(${(z)line})
+  local -a words
+  words=("${(@f)$( __fzf_rtfm_wsplit "$line" )}")
   (( ${#words} >= 2 )) || return 1
   local start_idx=1
   while (( start_idx <= ${#words} )) && __fzf_rtfm_is_wrapper "${words[start_idx]}"; do
@@ -1322,6 +1347,7 @@ __fzf_rtfm_man_options_from_topic() {
 typeset -gA __fzf_rtfm_entry_cache
 
 __fzf_build_entries_cached() {
+  setopt localoptions noxtrace noverbose
   local cmd="$1" sub="$2" full="${3-}" key e
   # sv depends on the full line / $SVDIR — do not cache.
   if [[ "$cmd" == sv ]]; then
@@ -1361,7 +1387,8 @@ __fzf_build_entries() {
       fi
       if [[ -n "$full_line" ]]; then
         setopt localoptions noshwordsplit
-        local -a _ipw=(${(z)full_line})
+        local -a _ipw
+        _ipw=("${(@f)$( __fzf_rtfm_wsplit "$full_line" )}")
         local _i=1 _obj=""
         while (( _i <= ${#_ipw} )) && __fzf_rtfm_is_wrapper "${_ipw[_i]}"; do
           ((_i++))
@@ -1677,6 +1704,7 @@ __fzf_pick() {
   # $1: entries (token<TAB>description)
   # $2: prompt label
   # $3: optional initial fzf query (current token)
+  setopt localoptions noxtrace noverbose
   local entries="$1"
   local prompt="$2"
   local query="${3-}"
@@ -1831,7 +1859,7 @@ __fzf_tab_completing_command_name() {
   local -a words
   local trailing=0
   [[ "$lb" == *[[:space:]] ]] && trailing=1
-  words=(${(z)lb})
+  words=("${(@f)$( __fzf_rtfm_wsplit "$lb" )}")
   local i=1
   while (( i <= ${#words} )) && __fzf_rtfm_is_wrapper "${words[i]}"; do
     (( i++ ))
@@ -2087,8 +2115,15 @@ __fzf_rtfm_cmd_wants_files() {
 # and drop tokens already present on the command line (no double --author).
 __fzf_rtfm_entries_to_man_rows() {
   local entries="$1" cmdline="${2-}"
-  [[ -n "$entries" ]] || return 0
-  print -r -- "$entries" | command awk -F '\t' 'NF {
+  {
+    if [[ -n "$entries" ]]; then
+      print -r -- "$entries"
+    elif [[ ! -t 0 ]]; then
+      command cat
+    else
+      return 0
+    fi
+  } | command awk -F '\t' 'NF {
     desc = $2
     gsub(/[ \t\n\r]+/, " ", desc)
     # Apostrophes in man text (Don'\''t, '\''table'\'') must not reach $SHELL -c.
@@ -2207,6 +2242,53 @@ __fzf_rtfm_dir_has_entries() {
   [[ -n "$first" ]]
 }
 
+# File row: display<TAB>f<TAB>fullpath. After zoom, display is the child name only.
+__fzf_rtfm_emit_file_row() {
+  setopt localoptions noshwordsplit
+  local full="$1" dir="${2:-.}" keep="${3:-0}" display
+  [[ -n "$full" ]] || return 0
+  if [[ "$dir" == . || "$dir" == ./ ]]; then
+    display="${full#./}"
+  else
+    display="${full##*/}"
+    [[ -n "$display" ]] || display="$full"
+  fi
+  if [[ "$keep" == 1 ]]; then
+    [[ "$full" == ./* || "$full" == /* ]] || full="./$full"
+    if [[ "$dir" == . || "$dir" == ./ ]]; then
+      display="$full"
+    fi
+  fi
+  print -r -- "${display}"$'\tf\t'"${full}"
+}
+
+# File row → path to insert/zoom; man row → option token.
+__fzf_rtfm_row_apply_token() {
+  setopt localoptions noshwordsplit
+  local row="$1" display kind extra
+  [[ -n "$row" ]] || return 1
+  display="${row%%$'\t'*}"
+  extra="${row#*$'\t'}"
+  kind="${extra%%$'\t'*}"
+  extra="${extra#*$'\t'}"
+  extra="${extra%%$'\t'*}"
+  if [[ "$kind" == f && -n "$extra" ]]; then
+    print -r -- "$extra"
+  else
+    print -r -- "$display"
+  fi
+}
+
+__fzf_rtfm_zoom_prompt() {
+  setopt localoptions noshwordsplit
+  local d="${1%/}"
+  if [[ "$d" == / || -z "$d" ]]; then
+    print -r -- '/ > '
+  else
+    print -r -- "${d:t}/ > "
+  fi
+}
+
 __fzf_tab_immediate_file_rows() {
   setopt localoptions noshwordsplit
   local dir="$1" mode="${2:-all}" depth="${3:-1}" hidden="${4:-1}" p name
@@ -2216,7 +2298,7 @@ __fzf_tab_immediate_file_rows() {
   [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
   # Offer / from cwd so cat/cd Tab can enter the root without typing it.
   if [[ "$dir" == . || "$dir" == ./ ]]; then
-    print -r -- "/"$'\tf\t'
+    print -r -- "/"$'\tf\t'"/"
   fi
   {
     if [[ "$dir" == / ]]; then
@@ -2250,8 +2332,6 @@ __fzf_tab_immediate_file_rows() {
       if [[ "$mode" == dirs || "$dir" == / ]] && [[ ! -d "$p" ]]; then
         continue
       fi
-      # Keep find paths (dir/name) so zoom/preview/insert retain the parent.
-      # Only strip a lone "./" prefix when listing from cwd without forced ./ keep.
       name="$p"
       if [[ "$dir" == . || "$dir" == ./ ]]; then
         name="${p#./}"
@@ -2260,10 +2340,7 @@ __fzf_tab_immediate_file_rows() {
       case "$name" in
         . | .. | */. | */..) continue ;;
       esac
-      if (( keep_dotslash )); then
-        [[ "$name" == ./* || "$name" == /* ]] || name="./$name"
-      fi
-      print -r -- "$name"$'\tf\t'
+      __fzf_rtfm_emit_file_row "$name" "$dir" "$keep_dotslash"
     done
 }
 
@@ -2282,6 +2359,7 @@ __fzf_tab_try_path_firstword() {
 }
 
 __fzf_pick_mixed() {
+  setopt localoptions noxtrace noverbose
   local entries="$1" prompt="$2" query="${3-}"
   local with_expect="${4-}"
   local zoom_mode="${5:-all}"
@@ -2352,16 +2430,27 @@ __fzf_pick_mixed() {
     preview_out=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-pout.XXXXXX")
     focus_script=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-pfocus.XXXXXX")
     print -r -- "$entries" | command awk -F '\t' 'NF {
-      if ($2 == "f") { print $1; exit }
+      if ($2 == "f") { if ($3 != "") print $3; else print $1; exit }
       print $3; exit
     }' >"$preview_out"
     {
       print -r '#!/bin/sh'
       print -r "manfile='$manfile'"
       print -r "preview_out='$preview_out'"
+      print -r "statefile='$state'"
       print -r 'tok=$1'
-      print -r 'if [ -e "$tok" ] || [ -L "$tok" ]; then'
-      print -r '  ls -ld -- "$tok" > "$preview_out" 2>/dev/null'
+      print -r 'dir=$(sed -n "1p" "$statefile" 2>/dev/null)'
+      print -r '[ -n "$dir" ] || dir=.'
+      print -r 'path=$tok'
+      print -r 'if [ "$dir" != . ] && [ "$dir" != ./ ] && [ ! -e "$tok" ] && [ ! -L "$tok" ]; then'
+      print -r '  case "$dir" in'
+      print -r '    /) cand="/$tok" ;;'
+      print -r '    *) cand="$dir/${tok#./}" ;;'
+      print -r '  esac'
+      print -r '  if [ -e "$cand" ] || [ -L "$cand" ]; then path=$cand; fi'
+      print -r 'fi'
+      print -r 'if [ -e "$path" ] || [ -L "$path" ]; then'
+      print -r '  ls -ld -- "$path" > "$preview_out" 2>/dev/null'
       print -r '  exit 0'
       print -r 'fi'
       print -r 'awk -F "\t" -v t="$tok" '\''$1==t { print $3; exit }'\'' "$manfile" > "$preview_out" 2>/dev/null'
@@ -2588,7 +2677,7 @@ __fzf_apply_mixed_pick() {
   [[ -z "$row" ]] && return 1
   kind="${row#*$'\t'}"
   kind="${kind%%$'\t'*}"
-  tok="${row%%$'\t'*}"
+  tok="$(__fzf_rtfm_row_apply_token "$row")"
   [[ -z "$tok" ]] && return 1
   if [[ "$kind" == f && -d "$tok" ]]; then
     __fzf_apply_dir_pick "$tok"
@@ -2603,7 +2692,8 @@ __fzf_apply_mixed_pick() {
 # or empty dir inserts it and reopens the picker for the next token. Enter inserts
 # and returns to the shell. Alt-. toggles hidden names. Esc leaves the line as-is.
 __fzf_rtfm_browse_apply() {
-  setopt localoptions noshwordsplit
+  # xtrace prints `_entries=$'…man…'` into the 90% gap above fzf on Tab-continue.
+  setopt localoptions noshwordsplit noxtrace noverbose
   local man_rows="$1" file_rows="$2" prompt="$3" q="$4" mode="$5"
   local orig_man_rows="$man_rows"
   local use_man=1
@@ -2655,7 +2745,7 @@ __fzf_rtfm_browse_apply() {
 
     kind="${row#*$'\t'}"
     kind="${kind%%$'\t'*}"
-    tok="${row%%$'\t'*}"
+    tok="$(__fzf_rtfm_row_apply_token "$row")"
 
     if [[ "$kind" == f && -n "$tok" && -d "$tok" ]]; then
       if [[ "$key" == tab ]] && __fzf_rtfm_dir_has_entries "$tok" "$mode" 1; then
@@ -2668,7 +2758,7 @@ __fzf_rtfm_browse_apply() {
           use_man=0
           man_rows=""
           q=""
-          show_prompt="${prompt}${tok%/}/"
+          show_prompt="$(__fzf_rtfm_zoom_prompt "$tok")"
           continue
         fi
       fi
@@ -2700,7 +2790,7 @@ __fzf_rtfm_browse_apply() {
     use_man=0
     file_rows=""
     if ! __fzf_rtfm_path_only; then
-      local _parsed _cmd _sub _entries
+      local _parsed _cmd _sub
       _parsed="$(__fzf_get_cmd_and_sub)" || _parsed=""
       _cmd="${_parsed%%$'\t'*}"
       _sub="${_parsed#*$'\t'}"
@@ -2709,8 +2799,7 @@ __fzf_rtfm_browse_apply() {
           man_rows=$'-L\tm\tfollow symbolic links\n-P\tm\tuse the physical directory structure'
           use_man=1
           list_mode=dirs
-        elif _entries="$(__fzf_build_entries_cached "$_cmd" "$_sub" "${LBUFFER}${RBUFFER}" 2>/dev/null)"; then
-          man_rows="$(__fzf_rtfm_entries_to_man_rows "$_entries" "${LBUFFER}${RBUFFER}")"
+        elif man_rows="$(__fzf_build_entries_cached "$_cmd" "$_sub" "${LBUFFER}${RBUFFER}" 2>/dev/null | __fzf_rtfm_entries_to_man_rows "" "${LBUFFER}${RBUFFER}")"; then
           [[ -n "$man_rows" ]] && use_man=1
         fi
         show_prompt="${_cmd}${_sub:+ $_sub} > "
@@ -2735,7 +2824,7 @@ __fzf_rtfm_browse_apply() {
       if __fzf_rtfm_path_only || [[ "$list_mode" == dirs ]]; then
         file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" "$list_mode" 1 1)"
       else
-        if __fzf_rtfm_cmd_wants_files "${_cmd-}" "${_sub-}" "${_entries-}"; then
+        if __fzf_rtfm_cmd_wants_files "${_cmd-}" "${_sub-}"; then
           file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" all 1 1)"
         fi
       fi
@@ -2746,7 +2835,7 @@ __fzf_rtfm_browse_apply() {
 }
 
 __fzf_tab_try_rtfm() {
-  setopt localoptions noshwordsplit
+  setopt localoptions noshwordsplit noxtrace noverbose
   __fzf_tab_completing_command_name && return 1
 
   local parsed cmd sub entries dir base q
@@ -2844,7 +2933,7 @@ __fzf_tab_try_rtfm() {
 }
 
 fzf_tab_unified_impl() {
-  setopt localoptions noshwordsplit extended_glob
+  setopt localoptions noshwordsplit extended_glob noxtrace noverbose
   __fzf_zle_token_state
   if __fzf_tab_completing_command_name && [[ -n "$lastw" ]] && __fzf_last_word_is_pathlike "$lastw"; then
     __fzf_tab_try_path_firstword || zle redisplay
