@@ -53,6 +53,8 @@
 #   * ip(8): uses OBJECT list from ip(8) plus options from per-object man pages (ip-<object>)
 #   * sv(8) (runit): OPTIONS + verbs first; after a verb, services under $SVDIR (/service, /var/service)
 #   * docker: uses docker --help parsing and docker SUB --help parsing
+#   * ps(1): BSD letters (a, u, f, x, w, …) cluster into one token (ps aufxwww);
+#     Tab after a letter stays on the same word. w may be repeated (www).
 # - UI:
 #   * Centered floating fzf window with rounded border and margin
 #   * Left column (20% area): option/subcommand token (fuzzy searched)
@@ -568,12 +570,21 @@ __fzf_rtfm_man_text() {
 __fzf_get_help_text() {
   # $1: binary name
   local binary_name="$1"
-  local txt
+  local txt more
 
   # Prefer `--help`, fall back to `-h`. PAGER=cat so help never blocks on a pager.
   txt=$(PAGER=cat MANPAGER=cat "$binary_name" --help 2>/dev/null) || true
   if [[ -z "$txt" ]]; then
     txt=$(PAGER=cat MANPAGER=cat "$binary_name" -h 2>/dev/null) || true
+  fi
+  # procps-ng ps(1): bare --help is a stub that points at
+  #   ps --help <simple|list|output|threads|misc|all>
+  # Use the combined dump so the dash parser actually sees options.
+  if print -r -- "$txt" | command rg -iq -- '--help[[:space:]]+<[^>]*\ball\b'; then
+    more=$(PAGER=cat MANPAGER=cat "$binary_name" --help all 2>/dev/null) || true
+    if [[ -n "$more" ]] && print -r -- "$more" | command rg -q -- '^[[:space:]]*-'; then
+      txt="$more"
+    fi
   fi
   # runit sv(8) often prints a one-line usage only on stderr when run with no args
   if [[ -z "$txt" && "$binary_name" == sv ]]; then
@@ -631,21 +642,43 @@ __fzf_parse_dash_options_block() {
     function is_footer(s) {
       # Stop before man trailers (AUTHOR/SEE ALSO often contain quotes that
       # must never land in fzf/shell strings).
-      return s ~ /^[[:space:]]*(SEE ALSO|AUTHOR|AUTHORS|REPORTING BUGS|COPYRIGHT|COLOPHON|BUGS|FILES|ENVIRONMENT|HISTORY|STANDARDS|NOTES|EXAMPLES)([[:space:]]|$)/
+      return s ~ /^[[:space:]]*(SEE ALSO|AUTHOR|AUTHORS|REPORTING BUGS|COPYRIGHT|COLOPHON|BUGS|FILES|ENVIRONMENT|HISTORY|STANDARDS|NOTES)([[:space:]]|$)/
+    }
+
+    # GNU pages put EXAMPLES after options; procps ps(1) puts it first.
+    # Only treat it as end-of-page once we have already seen a dash option.
+    function is_examples(s) {
+      return s ~ /^[[:space:]]*EXAMPLES([[:space:]]|$)/
+    }
+
+    # Undashed BSD letter (ps a/x/u). Must not be glued into the previous desc.
+    function looks_bsd(s,    line) {
+      line = s
+      gsub(/^[[:space:]]+/, "", line)
+      if (line ~ /^-/) return 0
+      if (line ~ /^[A-Za-z](,|[[:space:]]{2,})/) return 1
+      if (line ~ /^[A-Za-z][[:space:]]+[<([]/) return 1
+      if (line ~ /^[A-Za-z][[:space:]]+[A-Za-z][A-Za-z0-9_-]*[[:space:]]*$/) return 1
+      return 0
     }
 
     function emit() {
       if (in_entry && token != "" ) {
         print token "\t" desc
+        seen_opt = 1
       }
       in_entry = 0
       token = ""
       desc = ""
     }
 
-    BEGIN { in_entry = 0; token=""; desc="" }
+    BEGIN { in_entry = 0; token=""; desc=""; seen_opt = 0 }
 
     is_footer($0) { emit(); exit }
+    is_examples($0) {
+      if (seen_opt || in_entry) { emit(); exit }
+      next
+    }
 
     # Detect an option start line:
     # first non-space must be '-' followed by a non-space char.
@@ -706,6 +739,7 @@ __fzf_parse_dash_options_block() {
     {
       if (!in_entry) next
       if (is_blank($0)) next
+      if (looks_bsd($0)) { emit(); next }
 
       # New option start: emit previous entry, then re-process this line as a start.
       if ($0 ~ /^[[:space:]]*-[^[:space:]]/) {
@@ -757,6 +791,109 @@ __fzf_parse_dash_options_block() {
 
     END { emit() }
   ' | awk 'NF' | sort -u
+}
+
+# BSD / undashed letters (procps ps a/x/u, f/--forest). Skips NAME /
+# SYNOPSIS / DESCRIPTION / EXAMPLES so DESCRIPTION bullets like
+# "o   Unix options" are not treated as flags.
+__fzf_parse_bsd_letter_options() {
+  local text
+  if [[ $# -ge 1 ]]; then
+    text="$1"
+  else
+    text="$(</dev/stdin)"
+  fi
+
+  printf '%s\n' "$text" | awk '
+    function is_blank(s) { return s ~ /^[[:space:]]*$/ }
+
+    function is_heading(s) {
+      return s ~ /^[A-Z][A-Z0-9 ,\/+-]+$/ && s !~ /^[[:space:]]/
+    }
+
+    function is_skip_heading(s) {
+      return s ~ /^(NAME|SYNOPSIS|DESCRIPTION|EXAMPLES)([[:space:]]|$)/
+    }
+
+    function is_stop_heading(s) {
+      return s ~ /^(SEE ALSO|AUTHOR|AUTHORS|REPORTING BUGS|COPYRIGHT|COLOPHON|BUGS|FILES|ENVIRONMENT|HISTORY|STANDARDS|NOTES)([[:space:]]|$)/
+    }
+
+    function emit() {
+      if (in_entry && token != "") print token "\t" desc
+      in_entry = 0
+      token = ""
+      desc = ""
+    }
+
+    # Letter-first option: "a      desc", "f, --forest      desc",
+    # "O <format>      desc", or "o format" alone (desc on next lines).
+    # Reject prose like "a comma-separated list e.g.".
+    function bsd_try(s,    line, pos, rest, rest_after) {
+      line = s
+      gsub(/^[[:space:]]+/, "", line)
+      if (line ~ /^-/ || line !~ /^[A-Za-z]/) return 0
+      pos = 2
+      while (match(substr(line, pos), /^,[[:space:]]+(--[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z])/)) {
+        pos += RLENGTH
+      }
+      if (match(substr(line, pos), /^[[:space:]]+[<([][^[:space:]]+/)) {
+        pos += RLENGTH
+      } else if (match(substr(line, pos), /^[[:space:]]+[A-Za-z][A-Za-z0-9_-]*/)) {
+        rest_after = substr(line, pos + RLENGTH)
+        if (rest_after == "" || rest_after ~ /^[[:space:]]{2,}/) pos += RLENGTH
+      }
+      rest = substr(line, pos)
+      if (rest != "" && rest !~ /^[[:space:]]{2,}\S/) return 0
+      bsd_tok = substr(line, 1, 1)
+      bsd_desc = rest
+      gsub(/^[[:space:]]+/, "", bsd_desc)
+      return 1
+    }
+
+    BEGIN { in_entry = 0; token = ""; desc = ""; skip = 0; bsd_tok = ""; bsd_desc = "" }
+
+    is_stop_heading($0) { emit(); exit }
+    is_heading($0) {
+      emit()
+      skip = is_skip_heading($0) ? 1 : 0
+      next
+    }
+    skip { next }
+
+    {
+      if (bsd_try($0)) {
+        emit()
+        token = bsd_tok
+        desc = bsd_desc
+        in_entry = 1
+        next
+      }
+      if (!in_entry || is_blank($0)) next
+      if ($0 ~ /^[[:space:]]*-[^[:space:]]/) { emit(); next }
+      l = $0
+      gsub(/^[[:space:]]+/, "", l)
+      if (l != "") {
+        if (desc == "") desc = l
+        else desc = desc " " l
+      }
+    }
+
+    END { emit() }
+  ' | awk 'NF' | sort -u
+}
+
+__fzf_parse_all_options_block() {
+  local text
+  if [[ $# -ge 1 ]]; then
+    text="$1"
+  else
+    text="$(</dev/stdin)"
+  fi
+  {
+    printf '%s\n' "$text" | __fzf_parse_dash_options_block
+    printf '%s\n' "$text" | __fzf_parse_bsd_letter_options
+  } | awk 'NF' | sort -u
 }
 
 # ---------- Parse subcommands from a man `binary` page ----------
@@ -1261,6 +1398,23 @@ __fzf_rtfm_is_wrapper() {
   return 1
 }
 
+# procps ps(1) (and similar): undashed letters group, e.g. aufxwww.
+__fzf_rtfm_cmd_clusters_bsd() {
+  case "$1" in
+    ps) return 0 ;;
+  esac
+  return 1
+}
+
+__fzf_rtfm_is_bsd_letter() {
+  [[ "$1" == [A-Za-z] ]]
+}
+
+__fzf_rtfm_is_bsd_cluster() {
+  local w="$1"
+  [[ -n "$w" && "$w" != -* && ${#w} -le 16 && "$w" != *[^A-Za-z]* ]]
+}
+
 # Split a command line into words (one per line). Prefer ${(z)} so quotes
 # stay intact; fall back to spaces. Unmatched-quote parse noise is silenced
 # so it cannot paint above the 90%-height fzf UI.
@@ -1290,11 +1444,13 @@ __fzf_get_cmd_and_sub() {
   local cmd="${words[start_idx]}"
   local sub=""
   local i
-  for (( i = start_idx + 1; i <= ${#words}; i++ )); do
-    [[ "${words[i]}" == -* ]] && continue
-    sub="${words[i]}"
-    break
-  done
+  if ! __fzf_rtfm_cmd_clusters_bsd "$cmd"; then
+    for (( i = start_idx + 1; i <= ${#words}; i++ )); do
+      [[ "${words[i]}" == -* ]] && continue
+      sub="${words[i]}"
+      break
+    done
+  fi
 
   printf '%s\t%s\n' "$cmd" "$sub"
 }
@@ -1302,7 +1458,7 @@ __fzf_get_cmd_and_sub() {
 # Prefer OPTIONS section from a man topic; fall back to full-page dash parse.
 # Man page is kept on disk only — never assigned to a zsh scalar.
 __fzf_rtfm_man_options_from_topic() {
-  local topic="$1" tmp opts
+  local topic="$1" tmp opts bsd
   [[ -n "$topic" ]] || return 1
   tmp=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-manpage.XXXXXX") || return 1
   if ! PAGER=cat MANPAGER=cat GROFF_NO_SGR=1 command man "$topic" </dev/null 2>/dev/null \
@@ -1320,7 +1476,9 @@ __fzf_rtfm_man_options_from_topic() {
   if [[ -z "$opts" ]]; then
     opts="$(command cat "$tmp" | __fzf_parse_dash_options_block)" || opts=""
   fi
+  bsd="$(command cat "$tmp" | __fzf_parse_bsd_letter_options)" || bsd=""
   command rm -f "$tmp"
+  opts="$(printf '%s\n%s\n' "$opts" "$bsd" | awk 'NF' | sort -u)"
   [[ -n "$opts" ]] || return 1
   printf '%s\n' "$opts"
 }
@@ -1443,7 +1601,7 @@ __fzf_build_entries() {
       print -u2 "Binary $cmd has no manual or help."
       return 2
     }
-    printf '%s\n' "$help_txt" | __fzf_parse_dash_options_block | awk 'NF' | sort -u
+    printf '%s\n' "$help_txt" | __fzf_parse_all_options_block
     return 0
   else
     # sub is present: treat as binary-sub for sub-man (binary-sub). If no man, fall back to binary sub help.
@@ -1468,7 +1626,7 @@ __fzf_build_entries() {
       return 2
     fi
 
-    printf '%s\n' "$help_txt" | __fzf_parse_dash_options_block | awk 'NF' | sort -u
+    printf '%s\n' "$help_txt" | __fzf_parse_all_options_block
     return 0
   fi
 }
@@ -1504,6 +1662,8 @@ __fzf_rtfm_root_token_known() {
 __fzf_rtfm_sub_token_complete() {
   local cmd="$1" sub="$2" lastw="$3" full="${4-}"
   [[ -n "$sub" && "$lastw" == "$sub" && "$lastw" != -* ]] || return 1
+  # BSD letters (ps a/x/u) are flags, not finished subcommands.
+  [[ "$sub" == [A-Za-z] ]] && return 1
 
   local sub_e root_e
   root_e="$(__fzf_build_entries "$cmd" "" "$full" 2>/dev/null)" || root_e=""
@@ -1807,6 +1967,25 @@ __fzf_apply_pick() {
   zle redisplay
 }
 
+# Append a BSD letter to the current cluster (ps au + f → ps auf), no trailing space
+# so the next Tab can add another letter. Start a new cluster after a space or dash.
+__fzf_apply_bsd_letter() {
+  local letter="$1"
+  [[ -n "$letter" ]] || return 1
+  if __fzf_rtfm_is_bsd_cluster "$lastw"; then
+    if [[ -z "$prefix_rest" ]]; then
+      LBUFFER="${lastw}${letter}"
+    else
+      LBUFFER="${prefix_rest} ${lastw}${letter}"
+    fi
+  elif [[ -z "$prefix_rest" ]]; then
+    LBUFFER="${letter}"
+  else
+    LBUFFER="${prefix_rest} ${letter}"
+  fi
+  zle redisplay
+}
+
 __fzf_apply_dir_pick() {
   local picked="$1"
   [[ -z "$picked" ]] && return 1
@@ -2016,7 +2195,7 @@ __fzf_rtfm_text_wants_files() {
         w = $i
         gsub(/[][|()<>,.]/, "", w)
         if (w == "" || w ~ /^-/) continue
-        if (w ~ /^(OPTION|OPTIONS|SYNOPSIS|usage|Usage)$/) continue
+        if (tolower(w) ~ /^(option|options|synopsis|usage)$/) continue
         if (i == 1) { cmd0 = w; continue }
         if (w != cmd0 && w ~ /^[A-Za-z]/) pos = 1
       }
@@ -2116,20 +2295,38 @@ __fzf_rtfm_filter_used_line_tokens() {
     cat
     return 0
   }
+  local keep_repeat=0
   {
     local -a words
+    local seen_cmd=0 i
     words=("${(@f)$( __fzf_rtfm_wsplit "$cmdline" )}")
     for w in "${words[@]}"; do
       [[ -n "$w" ]] || continue
+      if (( !seen_cmd )); then
+        if __fzf_rtfm_is_wrapper "$w"; then
+          print -r -- "$w"
+          continue
+        fi
+        seen_cmd=1
+        __fzf_rtfm_cmd_clusters_bsd "$w" && keep_repeat=1
+        print -r -- "$w"
+        continue
+      fi
       print -r -- "$w"
       form="${w%%\=*}"
       [[ "$form" != "$w" && -n "$form" ]] && print -r -- "$form"
       if [[ "$w" == */* && "$w" != -* ]]; then
         print -r -- "${w:t}"
       fi
+      # Grouped BSD flags (aux, axu): hide the individual letters next time.
+      if [[ "$w" != -* && "$w" == [A-Za-z][A-Za-z]* && ${#w} -ge 2 && ${#w} -le 16 ]]; then
+        for (( i = 1; i <= ${#w}; i++ )); do
+          print -r -- "${w[i]}"
+        done
+      fi
     done
   } >"$usedfile"
-  command awk -F '\t' '
+  command awk -F '\t' -v keepw="$keep_repeat" '
     NR == FNR { if ($0 != "") u[$0] = 1; next }
     {
       tok = $1
@@ -2141,6 +2338,8 @@ __fzf_rtfm_filter_used_line_tokens() {
         if (f == "") continue
         base = f
         sub(/=.*/, "", base)
+        # ps w may be repeated (www) — never hide the letter.
+        if (keepw && (f == "w" || f == "W" || base == "w" || base == "W")) continue
         if (u[f] || (base != "" && u[base])) { drop = 1; break }
       }
       if (!drop) print
@@ -2636,7 +2835,7 @@ __fzf_rtfm_first_option_form() {
 }
 
 __fzf_apply_mixed_pick() {
-  local row="$1" kind tok
+  local row="$1" kind tok parsed cmd
   [[ -z "$row" ]] && return 1
   kind="${row#*$'\t'}"
   kind="${kind%%$'\t'*}"
@@ -2644,10 +2843,30 @@ __fzf_apply_mixed_pick() {
   [[ -z "$tok" ]] && return 1
   if [[ "$kind" == f && -d "$tok" ]]; then
     __fzf_apply_dir_pick "$tok"
-  else
-    [[ "$kind" == m ]] && tok="$(__fzf_rtfm_first_option_form "$tok")"
-    __fzf_apply_pick "$tok"
+    return
   fi
+  if [[ "$kind" == m ]]; then
+    tok="$(__fzf_rtfm_first_option_form "$tok")"
+    parsed="$(__fzf_get_cmd_and_sub)" || parsed=""
+    cmd="${parsed%%$'\t'*}"
+    if __fzf_rtfm_cmd_clusters_bsd "$cmd"; then
+      if __fzf_rtfm_is_bsd_letter "$tok"; then
+        __fzf_apply_bsd_letter "$tok"
+        return
+      fi
+      # Dashed option after an in-progress cluster (ps au + -e → ps au -e ).
+      if __fzf_rtfm_is_bsd_cluster "$lastw"; then
+        if [[ -z "$prefix_rest" ]]; then
+          LBUFFER="${lastw} ${tok} "
+        else
+          LBUFFER="${prefix_rest} ${lastw} ${tok} "
+        fi
+        zle redisplay
+        return
+      fi
+    fi
+  fi
+  __fzf_apply_pick "$tok"
 }
 
 # Turn off XTRACE and clear `functions -t` on RTFM helpers. Brace `2>/dev/null`
@@ -2948,6 +3167,10 @@ __fzf_tab_try_rtfm() {
   # Complete sub on the token (`docker ps`, `git status`): show its options
   # unfiltered. Incomplete prefix (`docker p`, `git sta`): keep q=lastw.
   if (( sub_complete )); then
+    q=""
+  fi
+  # In-progress BSD cluster (ps au): do not fuzzy-filter the next letter away.
+  if __fzf_rtfm_cmd_clusters_bsd "$cmd" && __fzf_rtfm_is_bsd_cluster "$lastw"; then
     q=""
   fi
 

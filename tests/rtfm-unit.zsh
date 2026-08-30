@@ -73,6 +73,48 @@ parsed="$(print -r -- '
 assert_ok 'parse emits -a or --all' '[[ "$parsed" == *"-a"* || "$parsed" == *"--all"* ]]'
 assert_ok 'parse emits -b or --brief' '[[ "$parsed" == *"-b"* || "$parsed" == *"--brief"* ]]'
 
+# procps ps(1) puts EXAMPLES before any dash options; do not abort there.
+parsed_ex="$(print -r -- '
+EXAMPLES
+       ps -e
+SIMPLE PROCESS SELECTION
+       -A     Select all processes.  Identical to -e.
+       -e     Select all processes.  Identical to -A.
+       --deselect
+              Negate the selection.
+NOTES
+       leftover should not be parsed
+       --bogus
+' | __fzf_parse_dash_options_block)"
+assert_ok 'parse skips leading EXAMPLES then reads options' \
+  '[[ "$parsed_ex" == *"-A"* && "$parsed_ex" == *"-e"* && "$parsed_ex" == *"--deselect"* ]]'
+assert_ok 'parse still stops at NOTES after options' \
+  '[[ "$parsed_ex" != *"--bogus"* ]]'
+
+bsd_fix="$(print -r -- '
+NAME
+ps - report
+DESCRIPTION
+       o   Unix options, which may be grouped and must be preceded by a dash.
+EXAMPLES
+       ps -e
+SIMPLE PROCESS SELECTION
+       a      Lift the BSD-style only-yourself restriction.
+       -A     Select all processes.
+       x      Lift the BSD-style must-have-a-tty restriction.
+       u      Display user-oriented format.
+  The selection options take as their argument either:
+    a comma-separated list e.g. '"'"'-u root'"'"'
+NOTES
+       o      not a flag
+' | __fzf_parse_bsd_letter_options)"
+assert_ok 'BSD parse emits a/x/u' \
+  'print -r -- "$bsd_fix" | command awk -F "\t" '\''$1=="a"{a=1}$1=="x"{x=1}$1=="u"{u=1} END{exit !(a&&x&&u)}'\'''
+assert_ok 'BSD parse skips DESCRIPTION bullet o' \
+  '! print -r -- "$bsd_fix" | command awk -F "\t" '\''$1=="o"{found=1} END{exit !found}'\'''
+assert_ok 'BSD parse skips prose a comma-separated' \
+  '[[ "$(print -r -- "$bsd_fix" | command awk -F "\t" '\''$1=="a"{c++} END{print c+0}'\'')" == 1 ]]'
+
 # --- complete vs incomplete sub (query must not hide options) ---
 LBUFFER='git sta'
 __fzf_zle_token_state
@@ -168,6 +210,62 @@ assert_ok 'ls docs trim AUTHOR/SEE ALSO/EXIT footers' \
   '[[ "$ls_docs" != *"REPORTING BUGS"* && "$ls_docs" != *"SEE ALSO"* && "$ls_docs" != *"EXIT STATUS"* ]]'
 assert_ok 'ls wants files without loading full docs path' \
   '__fzf_rtfm_cmd_wants_files ls'
+
+if command -v ps >/dev/null 2>&1; then
+  ps_entries="$(__fzf_build_entries ps '' 'ps ' 2>/dev/null)" || ps_entries=""
+  assert_ok 'ps offers selection options from man or --help all' \
+    '[[ "$ps_entries" == *"-e"* || "$ps_entries" == *"-A"* || "$ps_entries" == *"--deselect"* || "$ps_entries" == *"--pid"* ]]'
+  assert_ok 'ps offers BSD letters a/x/u' \
+    'print -r -- "$ps_entries" | command awk -F "\t" '\''$1=="a"{a=1}$1=="x"{x=1}$1=="u"{u=1} END{exit !(a&&x&&u)}'\'''
+  LBUFFER='ps a'
+  __fzf_zle_token_state
+  assert_ok 'ps a is a BSD flag query, not a subcommand' \
+    '! __fzf_rtfm_sub_token_complete ps a "$lastw" "$LBUFFER"'
+  ps_used="$(print -r -- $'a\tm\tall tty\nx\tm\tno tty\n-e\tm\tall' | __fzf_rtfm_filter_used_line_tokens 'ps aux ')"
+  assert_ok 'filter splits aux into a/u/x' \
+    'print -r -- "$ps_used" | command awk -F "\t" '\''$1=="a"{a=1}$1=="x"{x=1}$1=="-e"{e=1} END{exit !(!a && !x && e)}'\'''
+  ps_w="$(print -r -- $'w\tm\twide\na\tm\tall\nx\tm\tno tty' | __fzf_rtfm_filter_used_line_tokens 'ps auxwww ')"
+  assert_ok 'filter keeps repeatable w after auxwww' \
+    'print -r -- "$ps_w" | command awk -F "\t" '\''$1=="w"{w=1}$1=="a"{a=1}$1=="x"{x=1} END{exit !(w && !a && !x)}'\'''
+  LBUFFER='ps -A u '
+  assert_ok 'ps -A u is not a subcommand page' \
+    '[[ "$(__fzf_get_cmd_and_sub)" == $'\''ps\t'\'' ]]'
+  LBUFFER='ps au'
+  __fzf_zle_token_state
+  assert_ok 'ps au has empty sub' \
+    '[[ "$(__fzf_get_cmd_and_sub)" == $'\''ps\t'\'' ]]'
+  prefix_rest='ps' lastw=''
+  __fzf_apply_bsd_letter a
+  assert_ok 'bsd letter starts cluster without trailing space' \
+    '[[ "$LBUFFER" == "ps a" ]]'
+  LBUFFER='ps a'
+  __fzf_zle_token_state
+  __fzf_apply_bsd_letter u
+  assert_ok 'bsd letter appends to cluster' \
+    '[[ "$LBUFFER" == "ps au" ]]'
+  LBUFFER='ps au'
+  __fzf_zle_token_state
+  __fzf_apply_bsd_letter f
+  __fzf_zle_token_state
+  __fzf_apply_bsd_letter x
+  __fzf_zle_token_state
+  __fzf_apply_bsd_letter w
+  __fzf_zle_token_state
+  __fzf_apply_bsd_letter w
+  __fzf_zle_token_state
+  __fzf_apply_bsd_letter w
+  assert_ok 'bsd letters build aufxwww' \
+    '[[ "$LBUFFER" == "ps aufxwww" ]]'
+  LBUFFER='ps -A '
+  __fzf_zle_token_state
+  __fzf_apply_bsd_letter u
+  assert_ok 'bsd letter after dash option starts new cluster' \
+    '[[ "$LBUFFER" == "ps -A u" ]]'
+  assert_ok 'ps synopsis [option ...] does not imply files' \
+    '! __fzf_rtfm_cmd_wants_files ps'
+else
+  print -r -- "skip- ps not installed"
+fi
 man_rows_ls="$(__fzf_rtfm_entries_to_man_rows "$(__fzf_build_entries ls '' 2>/dev/null)" 'ls --author ')"
 assert_ok 'ls man_rows drop used --author' '[[ "$man_rows_ls" != *"--author"* ]]'
 assert_ok 'ls man_rows neutralize apostrophes in desc' \
