@@ -4,7 +4,7 @@
 
 <h1 align="center">Read The <s>F@%$#!</s> Fuzzy Manual</h1>
 
-<p align="center"><strong>RTFM</strong> — a zsh plugin that finds command options, arguments, and paths from the real manual, blazingly fast.</p>
+<p align="center"><strong>RTFM</strong>: a zsh plugin that finds command options, arguments, and paths from the real manual, blazingly fast.</p>
 
 <p align="center">
   <a href="#showcase">Showcase</a> ·
@@ -19,7 +19,7 @@
 
 In an age of autocomplete, Stack Overflow snippets, and AI that will happily invent flags, it is still worth going back to the fundamentals: the **manual** that shipped with the tool.
 
-RTFM puts that manual under your thumb. Hit **Tab**, fuzzy-filter what you need, read the description, insert the token — without leaving the line, and without guessing.
+RTFM puts that manual under your thumb. Hit **Tab**, fuzzy-filter what you need, read the description, insert the token, without leaving the line, and without guessing.
 
 It is a **zsh** plugin powered by **fzf**. It reads **man** pages (and `--help` when man is missing), understands common subcommands, and browses files when the command wants a path.
 
@@ -112,7 +112,7 @@ Press **?** inside any picker for a short key guide (**q** to close).
 ### Plain `source`
 
 ```zsh
-# ~/.zshrc — use your real clone path
+# ~/.zshrc: use your real clone path
 source ~/src/RTFM/rtfm.plugin.zsh
 
 # If fzf --zsh or compinit rebinds Tab, put this last:
@@ -250,20 +250,20 @@ Functions are private (`__fzf_*`) except public helpers and widget entrypoints. 
 
 **Load-time / UI**
 
-- `__fzf_rtfm_merged_path_scheme` — `--scheme path` when supported  
-- `__fzf_rtfm_fzf_window_common`, `_fzf_binds_*`, `_fzf_preview_window` — shared geometry and keys  
-- `__fzf_rtfm_print_help` / `_ensure_help_script` — **?** pager  
-- `__fzf_rtfm_ensure_preview_script` / `_write_lister` / `_write_transformer` / `_write_toggler` — preview + in-fzf scripts (lister embeds `__fzf_rtfm_list_paths` / `_emit_file_row`)  
-- `__fzf_rtfm_resolve_path_pick` — join picks onto a typed directory prefix  
-- `__fzf_rtfm_man_options_from_topic` — OPTIONS-section-first man parse  
-- `__fzf_rtfm_untrace` — clear `xtrace` / `functions -t` on RTFM helpers (name auto-discovery)  
-- `__fzf_rtfm_tab_continue_rebuild` — Tab-continue state into a temp dir  
+- `__fzf_rtfm_merged_path_scheme`: `--scheme path` when supported  
+- `__fzf_rtfm_fzf_window_common`, `_fzf_binds_*`, `_fzf_preview_window`: shared geometry and keys  
+- `__fzf_rtfm_print_help` / `_ensure_help_script`: **?** pager  
+- `__fzf_rtfm_ensure_preview_script` / `_write_lister` / `_write_transformer` / `_write_toggler`: preview + in-fzf scripts (lister embeds `__fzf_rtfm_list_paths` / `_emit_file_row`)  
+- `__fzf_rtfm_resolve_path_pick`: join picks onto a typed directory prefix  
+- `__fzf_rtfm_man_options_from_topic`: OPTIONS-section-first man parse  
+- `__fzf_rtfm_untrace`: clear `xtrace` / `functions -t` on RTFM helpers (name auto-discovery)  
+- `__fzf_rtfm_tab_continue_rebuild`: Tab-continue state into a temp dir  
 
 **TTY**
 
 - `__fzf_tty_unfreeze` / `_refreeze`, `_drain_tty_input`  
 - `__fzf_rtfm_stty_for_fzf` / `_restore`, `_zle_parent_tty_prepare` / `_restore`  
-- `__fzf_rtfm_fzf_exec` — `fzf` or `fzf-tmux`  
+- `__fzf_rtfm_fzf_exec`: `fzf` or `fzf-tmux`  
 
 **Docs ingest / parse**
 
@@ -271,7 +271,7 @@ Functions are private (`__fzf_*`) except public helpers and widget entrypoints. 
 - `__fzf_parse_dash_options_block`, `__fzf_parse_man_subcommands`  
 - `__fzf_rtfm_text_wants_files`, `__fzf_rtfm_docs_text` / `_docs_trim`  
 - Docker / ip / sv: `__fzf_docker_*`, `__fzf_ip_*`, `__fzf_sv_*`  
-- `__fzf_build_entries` / `_cached` — router + cache  
+- `__fzf_build_entries` / `_cached`: router + cache  
 
 **Tab / path / picker**
 
@@ -297,5 +297,5 @@ zsh tests/rtfm-unit.zsh
 
 ```bash
 gh repo create RTFM --public --source=. --remote=origin \
-  --description "Read The Fuzzy Manual — zsh Tab + fzf for man, help, and paths" --push
+  --description "Read The Fuzzy Manual: zsh Tab + fzf for man, help, and paths" --push
 ```
