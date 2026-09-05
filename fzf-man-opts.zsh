@@ -48,6 +48,9 @@
 # - No Alt-m bind. One picker per Tab (directory Tab stays inside that picker).
 # - Uses man pages (and sub-man pages like git-status / git-commit) when available
 # - Otherwise falls back to `binary --help` / `binary -h`
+# - Also parses Commands / Available Commands / subcommands from --help
+#   (pip, uv, podman, clap/cobra/argparse) so verbs are not dropped when the
+#   page has no cmd-* man topics. Nested `cmd sub --help` uses the same parse.
 # - UI: left token, right description (man text, or size+permissions for files)
 # - Special cases:
 #   * ip(8): uses OBJECT list from ip(8) plus options from per-object man pages (ip-<object>)
@@ -883,6 +886,65 @@ __fzf_parse_bsd_letter_options() {
   ' | awk 'NF' | sort -u
 }
 
+# Verbs from --help "Commands:" / "Available Commands:" / "subcommands:"
+# (pip, uv, podman, clap, cobra, argparse). Name + description only;
+# wrapped continuation lines and option sections are ignored.
+__fzf_parse_help_commands() {
+  local text
+  if [[ $# -ge 1 ]]; then
+    text="$1"
+  else
+    text="$(</dev/stdin)"
+  fi
+
+  printf '%s\n' "$text" | command awk '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+
+    function is_cmd_header(s,    t) {
+      t = trim(s)
+      if (t ~ /^[Ss]ubcommands:$/) return 1
+      if (t ~ /^([A-Za-z]+[[:space:]]+)*[Cc]ommands:$/) return 1
+      return 0
+    }
+
+    # "General Options:", "Cache options:", "Flags:", "See also:"
+    function is_other_header(s,    t) {
+      t = trim(s)
+      if (t == "") return 0
+      if (is_cmd_header(t)) return 0
+      return t ~ /^[A-Za-z][A-Za-z0-9 /+_-]*:$/
+    }
+
+    BEGIN { in_cmds = 0 }
+
+    is_cmd_header($0) { in_cmds = 1; next }
+    in_cmds && is_other_header($0) { in_cmds = 0; next }
+    !in_cmds { next }
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*-/ { next }
+
+    {
+      line = $0
+      gsub(/^[[:space:]]+/, "", line)
+      if (line !~ /[[:space:]]{2,}[^[:space:]]/) next
+
+      name = line
+      sub(/[[:space:]].*/, "", name)
+      sub(/,$/, "", name)
+      if (name !~ /^[A-Za-z][A-Za-z0-9_-]*$/) next
+
+      desc = line
+      sub(/^.*[[:space:]]{2,}/, "", desc)
+      if (desc == "" || desc ~ /^-/) next
+
+      print name "\t" desc
+    }
+  ' | awk 'NF' | sort -u
+}
+
 __fzf_parse_all_options_block() {
   local text
   if [[ $# -ge 1 ]]; then
@@ -893,6 +955,7 @@ __fzf_parse_all_options_block() {
   {
     printf '%s\n' "$text" | __fzf_parse_dash_options_block
     printf '%s\n' "$text" | __fzf_parse_bsd_letter_options
+    printf '%s\n' "$text" | __fzf_parse_help_commands
   } | awk 'NF' | sort -u
 }
 
@@ -1584,11 +1647,20 @@ __fzf_build_entries() {
   if __fzf_is_empty "$sub"; then
     # root command: if man exists, show sub-man topics (binary-*) + options from binary man
     if __fzf_man_topic_exists "$cmd"; then
-      local subs opts topic merged
+      local subs opts topic merged help_txt help_cmds
       topic="$cmd"
       subs="$(__fzf_parse_man_subcommands "$cmd")" || true
       opts="$(__fzf_rtfm_man_options_from_topic "$topic")" || opts=""
-      merged="$(printf '%s\n%s\n' "$subs" "$opts" | awk 'NF' | sort -u)"
+      # man -k ^cmd- is empty for pip-style tools that only list verbs in
+      # --help. Keep man options, but still pull Commands from help.
+      help_cmds=""
+      if [[ -z "$subs" ]]; then
+        help_txt="$(__fzf_get_help_text "$cmd" 2>/dev/null)" || help_txt=""
+        if [[ -n "$help_txt" ]]; then
+          help_cmds="$(print -r -- "$help_txt" | __fzf_parse_help_commands)" || help_cmds=""
+        fi
+      fi
+      merged="$(printf '%s\n%s\n%s\n' "$subs" "$help_cmds" "$opts" | awk 'NF' | sort -u)"
       if [[ -n "$merged" ]]; then
         printf '%s\n' "$merged"
         return 0

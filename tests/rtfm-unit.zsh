@@ -91,6 +91,104 @@ assert_ok 'parse skips leading EXAMPLES then reads options' \
 assert_ok 'parse still stops at NOTES after options' \
   '[[ "$parsed_ex" != *"--bogus"* ]]'
 
+# --- help Commands: / Available Commands: / subcommands: (pip, cobra, clap) ---
+pip_help='Usage:
+  pip <command> [options]
+
+Commands:
+  install                     Install packages.
+  lock                        Generate a lock file.
+  check                       Verify installed packages have compatible
+dependencies.
+  config                      Manage local and global configuration.
+  help                        Show help for commands.
+
+General Options:
+  -h, --help                  Show help.
+  -v, --verbose               Give more output.
+'
+help_cmds="$(print -r -- "$pip_help" | __fzf_parse_help_commands)"
+assert_ok 'help commands emit install' '[[ "$help_cmds" == *$'\''\n'\''install$'\''\t'\''* || "$help_cmds" == install$'\''\t'\''* ]]'
+assert_ok 'help commands emit lock' '[[ "$help_cmds" == *"lock"$'\''\t'\''* ]]'
+assert_ok 'help commands emit wrapped check' '[[ "$help_cmds" == *"check"$'\''\t'\''* ]]'
+assert_ok 'help commands emit help verb' '[[ "$help_cmds" == *"help"$'\''\t'\''* ]]'
+assert_ok 'help commands skip wrapped continuation' \
+  '! print -r -- "$help_cmds" | command awk -F "\t" '\''$1=="dependencies"{found=1} END{exit !found}'\'''
+assert_ok 'help commands skip dash options' '[[ "$help_cmds" != *"--help"* && "$help_cmds" != *"-v"* ]]'
+help_all="$(print -r -- "$pip_help" | __fzf_parse_all_options_block)"
+assert_ok 'all-options block keeps --help and install' \
+  '[[ "$help_all" == *"--help"* && "$help_all" == *"install"$'\''\t'\''* ]]'
+
+cobra_help='Usage:
+  tool [command]
+
+Available Commands:
+  artifact    Manage OCI artifacts
+  attach      Attach to a running container
+  help        Help about any command
+
+Flags:
+  -h, --help   help for tool
+'
+cobra_cmds="$(print -r -- "$cobra_help" | __fzf_parse_help_commands)"
+assert_ok 'Available Commands emit artifact' '[[ "$cobra_cmds" == *"artifact"$'\''\t'\''* ]]'
+assert_ok 'Available Commands emit attach' '[[ "$cobra_cmds" == *"attach"$'\''\t'\''* ]]'
+
+clap_help='Usage: tool [OPTIONS] <COMMAND>
+
+Commands:
+  build, b    Compile the current package
+  run         Run a command
+  help        Print help
+
+Cache options:
+  -n, --no-cache  Avoid the cache
+'
+clap_cmds="$(print -r -- "$clap_help" | __fzf_parse_help_commands)"
+assert_ok 'clap alias uses primary name build' \
+  'print -r -- "$clap_cmds" | command awk -F "\t" '\''$1=="build"{found=1} END{exit !found}'\'''
+assert_ok 'clap Commands stop before Cache options' \
+  '[[ "$clap_cmds" != *"--no-cache"* ]]'
+
+pipx_help='usage: pipx [-h] [--version]
+
+subcommands:
+  Get help for commands with pipx COMMAND --help
+
+  {install,uninstall,list}
+    install             Install a package
+    uninstall           Uninstall a package
+    list                List installed packages
+
+options:
+  -h, --help            show this help message and exit
+'
+pipx_cmds="$(print -r -- "$pipx_help" | __fzf_parse_help_commands)"
+assert_ok 'argparse subcommands emit install' \
+  'print -r -- "$pipx_cmds" | command awk -F "\t" '\''$1=="install"{found=1} END{exit !found}'\'''
+assert_ok 'argparse subcommands skip brace summary' \
+  '! print -r -- "$pipx_cmds" | command awk -F "\t" '\''$1 ~ /^\{/{found=1} END{exit !found}'\'''
+assert_ok 'argparse subcommands skip Get help prose' \
+  '! print -r -- "$pipx_cmds" | command awk -F "\t" '\''$1=="Get"{found=1} END{exit !found}'\'''
+
+if command -v pip >/dev/null 2>&1; then
+  pip_entries="$(__fzf_build_entries pip '' 2>/dev/null)" || pip_entries=""
+  assert_ok 'pip entries include install' '[[ "$pip_entries" == *"install"$'\''\t'\''* ]]'
+  assert_ok 'pip entries include uninstall' '[[ "$pip_entries" == *"uninstall"$'\''\t'\''* ]]'
+  assert_ok 'pip entries include freeze' '[[ "$pip_entries" == *"freeze"$'\''\t'\''* ]]'
+  assert_ok 'pip entries still include --verbose' '[[ "$pip_entries" == *"--verbose"* ]]'
+  LBUFFER='pip inst'
+  __fzf_zle_token_state
+  assert_ok 'pip inst is an incomplete sub prefix' \
+    '! __fzf_rtfm_sub_token_complete pip inst "$lastw" "$LBUFFER"'
+  LBUFFER='pip install'
+  __fzf_zle_token_state
+  assert_ok 'pip install is a complete sub' \
+    '__fzf_rtfm_sub_token_complete pip install "$lastw" "$LBUFFER"'
+else
+  print -r -- "skip- pip not installed"
+fi
+
 bsd_fix="$(print -r -- '
 NAME
 ps - report
