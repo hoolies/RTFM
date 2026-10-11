@@ -73,6 +73,57 @@ parsed="$(print -r -- '
 assert_ok 'parse emits -a or --all' '[[ "$parsed" == *"-a"* || "$parsed" == *"--all"* ]]'
 assert_ok 'parse emits -b or --brief' '[[ "$parsed" == *"-b"* || "$parsed" == *"--brief"* ]]'
 
+# curl-style: example lines and "can be used several times" restatements
+# must not become extra -F / --form rows. --form-string stays distinct.
+curl_form="$(print -r -- '
+       -F, --form <name=content>
+              For HTTP POST multipart forms.
+              -F "name=daniel;type=text/foo"
+              -F "file=@localfile;filename=nameinpost"
+              --form can be used several times in a command line
+       --form-string <name=string>
+              Similar to --form except the value is literal.
+              --form-string can be used several times in a command line
+       --form-escape
+              Escape multipart form names.
+' | __fzf_parse_dash_options_block)"
+assert_ok 'curl -F heading appears once' \
+  '[[ "$(print -r -- "$curl_form" | command awk -F "\t" '\''$1 ~ /(^| )-F([, ]|$)/ || $1 == "-F"{c++} END{print c+0}'\'')" == 1 ]]'
+assert_ok 'curl --form restatement is not its own row' \
+  '! print -r -- "$curl_form" | command awk -F "\t" '\''$1=="--form"{found=1} END{exit !found}'\'''
+assert_ok 'curl example -F quoted line is not its own row' \
+  '! print -r -- "$curl_form" | command awk -F "\t" '\''$1 ~ /daniel/{found=1} END{exit !found}'\'''
+assert_ok 'curl --form-string stays distinct' \
+  'print -r -- "$curl_form" | command awk -F "\t" '\''index($1,"--form-string")==1{found=1} END{exit !found}'\'''
+assert_ok 'curl --form-escape stays distinct' \
+  'print -r -- "$curl_form" | command awk -F "\t" '\''index($1,"--form-escape")==1{found=1} END{exit !found}'\'''
+dup_help="$(print -r -- '
+       -h, --help
+              first help
+       -h, --help
+              second help
+       -v, --verbose
+              verbose mode
+' | __fzf_parse_dash_options_block)"
+assert_ok 'duplicate -h,--help collapses to one row' \
+  '[[ "$(print -r -- "$dup_help" | command awk -F "\t" '\''$1 ~ /--help/{c++} END{print c+0}'\'')" == 1 ]]'
+assert_ok 'uniq keeps first -h description' \
+  'print -r -- "$dup_help" | command awk -F "\t" '\''$1 ~ /--help/ && $2 ~ /first/{found=1} END{exit !found}'\'''
+assert_ok 'uniq still emits --verbose' \
+  '[[ "$dup_help" == *"--verbose"* ]]'
+
+if command -v curl >/dev/null 2>&1; then
+  curl_entries="$(__fzf_build_entries curl '' 2>/dev/null)" || curl_entries=""
+  if [[ -n "$curl_entries" ]]; then
+    assert_ok 'live curl has a single -F row' \
+      '[[ "$(print -r -- "$curl_entries" | command awk -F "\t" '\''$1 ~ /(^| )-F([, ]|$)/ || $1 == "-F"{c++} END{print c+0}'\'')" == 1 ]]'
+  else
+    print -r -- "skip- curl entries empty"
+  fi
+else
+  print -r -- "skip- curl not installed"
+fi
+
 # procps ps(1) puts EXAMPLES before any dash options; do not abort there.
 parsed_ex="$(print -r -- '
 EXAMPLES
@@ -496,6 +547,69 @@ command rm -f "$_xt"
 assert_ok 'path scheme array is declared' '[[ -n "${__fzf_rtfm_merged_path_scheme+x}" ]]'
 assert_ok 'help script executable' '[[ -x "$__fzf_rtfm_help_script" ]]'
 assert_ok 'preview script executable' '[[ -x "$__fzf_rtfm_preview_script" ]]'
+
+# --- wrappers: skip flags and env assignments ---
+LBUFFER='sudo -u root docker ps '
+assert_ok 'sudo -u root docker ps sees docker' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == docker$'\''\t'\''ps ]]'
+LBUFFER='env FOO=1 ls '
+assert_ok 'env FOO=1 ls sees ls' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+LBUFFER='nice -n 19 make '
+assert_ok 'nice -n 19 make sees make' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == make$'\''\t'\'' ]]'
+LBUFFER='doas -u root sv status '
+assert_ok 'doas -u root sv status offers services' \
+  '__fzf_sv_should_offer_services "$LBUFFER"'
+assert_ok 'sudo -u without a user is needarg' \
+  '[[ "$(__fzf_rtfm_scan_command_words sudo -u)" == needarg ]]'
+
+# --- BSD letter split is only for ps ---
+_plain=$'s\tm\tshort\nu\tm\tuntracked\n--long\tm\tlong'
+_plain_out="$(print -r -- "$_plain" | __fzf_rtfm_filter_used_line_tokens 'git status ')"
+assert_ok 'git status does not hide letter s' \
+  'print -r -- "$_plain_out" | command awk -F "\t" '\''$1=="s"{found=1} END{exit !found}'\'''
+assert_ok 'git status does not hide letter u' \
+  'print -r -- "$_plain_out" | command awk -F "\t" '\''$1=="u"{found=1} END{exit !found}'\'''
+
+# --- paths only when the text names a file, not any positional word ---
+assert_ok 'FILE token wants files' \
+  '__fzf_rtfm_text_wants_files "Usage: install [OPTION]... FILE"'
+assert_ok 'positional message does not want files' \
+  '! __fzf_rtfm_text_wants_files $'"'"'SYNOPSIS\n       git commit [options] message'"'"
+
+# --- help probes do not read the caller stdin ---
+_help_in="$(printf 'LEAK\n' | __fzf_rtfm_capture_help sh -c 'read line || line=EMPTY; printf "%s" "$line"')"
+assert_ok 'help probe stdin is /dev/null' '[[ "$_help_in" == EMPTY ]]'
+
+# --- generated sh quoting ---
+_sq="$(__fzf_rtfm_sh_sq "a'b")"
+if [[ "$_sq" == "'a'\\''b'" ]]; then
+  print -r -- "ok  - posix single quote escapes apostrophe"
+  PASS=$((PASS + 1))
+else
+  print -r -- "FAIL- posix single quote escapes apostrophe (got $_sq)"
+  FAIL=$((FAIL + 1))
+fi
+
+# --- empty picker hands Tab back ---
+__fzf_rtfm_prev_tab_widget=expand-or-complete
+zle() { print -r -- "called:$*"; }
+_fb="$(__fzf_rtfm_fallback_tab)"
+zle() { :; }
+assert_ok 'fallback calls the previous Tab widget' '[[ "$_fb" == "called:expand-or-complete" ]]'
+
+# --- preview hides secret-looking files ---
+_sec=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-sec.XXXXXX")
+print -r -- 'SUPERSECRET' >"$_sec/.env"
+print -r -- 'hello-preview' >"$_sec/note.txt"
+_env_out="$("$__fzf_rtfm_preview_script" "$_sec/.env" f)"
+_note_out="$("$__fzf_rtfm_preview_script" "$_sec/note.txt" f)"
+assert_ok 'preview hides .env contents' \
+  '[[ "$_env_out" == *hidden* && "$_env_out" != *SUPERSECRET* ]]'
+assert_ok 'preview still shows a normal text file' \
+  '[[ "$_note_out" == *hello-preview* ]]'
+command rm -rf -- "$_sec"
 
 print -r -- ""
 print -r -- "passed=$PASS failed=$FAIL"

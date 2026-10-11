@@ -94,7 +94,7 @@ Press **?** inside any picker for a short key guide (**q** to close).
 | **Options / args** | From **man** when possible, else `--help` / `-h`; sub-man pages like `git-status` |
 | **Paths** | Mixed in when usage looks like it takes a file; depth-1 browse; zoom with Tab |
 | **Already used** | Options and path tokens already on the line are dropped from the next picker |
-| **Preview** | Man/help text for options; `ls -ld` + contents for files; directory listing for dirs |
+| **Preview** | Man/help text for options; `ls -ld` + contents for files; directory listing for dirs. Contents of `.env`, keys, and similar names are not shown |
 | **Safety** | Enter only inserts; Esc aborts; never executes the line |
 
 ---
@@ -171,6 +171,8 @@ zinit snippet /FULL/PATH/TO/RTFM/fzf-man-opts.zsh
 | `FZF_RTFM_NO_PATH_SCHEME` | `1` → skip `--scheme path` (very old fzf) |
 | `SVDIR` | Runit services for `sv` (default `/service`, else `/var/service`) |
 
+The picker does not read `FZF_DEFAULT_OPTS`. A bind there (for example Enter running a command) would break “Enter only inserts”.
+
 ---
 
 ## Credits
@@ -228,7 +230,7 @@ Technical reference for contributors and anyone debugging the widget.
 | `sv` | OPTIONS + verbs; after a verb, services from `$SVDIR` |
 | `cd` / `pushd` | zsh `-L`/`-P` only (no Tcl man cd); then dirs |
 
-**Wrappers skipped:** `sudo` `doas` `command` `builtin` `env` `time` `nice` `nohup`
+**Wrappers skipped,** including their flags and `NAME=value` words: `sudo` `doas` `command` `builtin` `env` `time` `nice` `nohup` (`sudo -u root docker`, `env FOO=1 ls`, `nice -n 19 make`)
 
 **UI:** centered fzf (~90% height), rounded border; ~20% token column, ~80% preview.
 
@@ -240,6 +242,7 @@ fzf_rtfm_diagnose        # TTY / fzf / environment dump
 ```
 
 If Tab is still stock completion, call `fzf_rtfm_rebind_tab` at the **end** of `~/.zshrc`.  
+When RTFM has nothing to insert, Tab falls through to the widget that was bound before it (usually `expand-or-complete`).  
 If typing fails inside tmux: `export FZF_RTFM_USE_TMUX=1`.
 
 **xtrace / `functions -t`:** Tab-continue rebuilds under `__fzf_rtfm_untrace` with stderr redirected (fixed fd 8) so locals and mktemp paths are not painted above the picker. Man pages are parsed from temp files, not kept as huge scalars. Re-source after a debug session if needed.
