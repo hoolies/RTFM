@@ -51,6 +51,48 @@ lastw=''
 assert_ok 'resolve unchanged without prefix' \
   '[[ "$(__fzf_rtfm_resolve_path_pick foo)" == foo ]]'
 
+# --- paths with spaces are one shell word (backslash-escaped) ---
+assert_ok 'quote escapes spaces in a directory' \
+  '[[ "$(__fzf_rtfm_shell_quote_path "/this is an example/")" == "/this\\ is\\ an\\ example/" ]]'
+assert_ok 'quote leaves a plain path alone' \
+  '[[ "$(__fzf_rtfm_shell_quote_path src/file)" == src/file ]]'
+assert_ok 'quote leaves an option alone' \
+  '[[ "$(__fzf_rtfm_shell_quote_path "--color[=WHEN]")" == "--color[=WHEN]" ]]'
+assert_ok 'quote keeps a leading tilde expandable' \
+  '[[ "$(__fzf_rtfm_shell_quote_path "~/My Dir/file")" == "~/My\\ Dir/file" ]]'
+assert_ok 'unquote restores an escaped path' \
+  '[[ "$(__fzf_rtfm_shell_unquote "/this\\ is\\ an\\ example/")" == "/this is an example/" ]]'
+_sq="$(__fzf_rtfm_shell_unquote "'/this is an example/'")"
+assert_ok 'unquote restores a single-quoted path' \
+  '[[ "$_sq" == "/this is an example/" ]]'
+lastw='src/my\ dir/'
+assert_ok 'resolve joins onto an escaped directory prefix' \
+  '[[ "$(__fzf_rtfm_resolve_path_pick child)" == "src/my dir/child" ]]'
+prefix_rest='cd'
+__fzf_apply_dir_pick '/this is an example'
+assert_ok 'dir pick inserts an escaped directory with a trailing slash' \
+  '[[ "$LBUFFER" == "cd /this\\ is\\ an\\ example/" ]]'
+prefix_rest='cat'
+lastw=''
+__fzf_apply_pick './my file.txt'
+assert_ok 'file pick inserts an escaped path and a trailing space' \
+  '[[ "$LBUFFER" == "cat ./my\\ file.txt " ]]'
+prefix_rest='ls'
+lastw=''
+__fzf_apply_pick '--color[=WHEN]'
+assert_ok 'option pick is not escaped' \
+  '[[ "$LBUFFER" == "ls --color[=WHEN] " ]]'
+LBUFFER='cd /this\ is\ an\ example/'
+__fzf_zle_token_state
+assert_ok 'escaped directory is still a directory prefix' \
+  '__fzf_rtfm_is_dir_prefix'
+assert_ok 'escaped directory is pathlike' \
+  '__fzf_last_word_is_pathlike "$lastw"'
+_space_rows=$'my file\tf\t./my file'
+_space_out="$(print -r -- "$_space_rows" | __fzf_rtfm_filter_used_line_tokens 'cat ./my\ file ')"
+assert_ok 'used-token filter drops an escaped path' \
+  '[[ -z "$_space_out" ]]'
+
 # --- sv wrappers ---
 assert_ok 'sv status offers services' \
   '__fzf_sv_should_offer_services "sv status"'
@@ -457,7 +499,16 @@ assert_ok 'zoom prompt for root' \
 cwd_rows="$(cd "$_td" && lastw='' && __fzf_tab_immediate_file_rows . all 1 1)"
 assert_ok 'cwd list keeps src as both display and path' \
   'print -r -- "$cwd_rows" | command awk -F "\t" '\''$1=="src" && $3=="src" {found=1} END{exit !found}'\'''
-command rm -rf "$_td"
+_spaced=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-spaced.XXXXXX")
+mkdir -p -- "$_spaced/this is an example/nested"
+LBUFFER='cd this\ is\ an\ example/'
+__fzf_zle_token_state
+assert_ok 'escaped prefix lists the real directory' \
+  '( cd -- "$_spaced" && __fzf_tab_path_token_dir_base && [[ "$dir" == "this is an example" || "$dir" == "this is an example/" ]] )'
+_space_list="$(cd -- "$_spaced" && __fzf_tab_immediate_file_rows "this is an example" dirs 1 1)"
+assert_ok 'listing a spaced directory shows its child' \
+  'print -r -- "$_space_list" | command awk -F "\t" '\''$1=="nested" {found=1} END{exit !found}'\'''
+command rm -rf -- "$_td" "$_spaced"
 
 # --- shared word split handles quotes; matches token state ---
 LBUFFER="git commit -m 'hello world' "

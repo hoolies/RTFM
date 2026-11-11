@@ -46,6 +46,7 @@
 #   Tab into a non-empty directory: show that directory's immediate children as
 #   names only (not parent/child); insert still uses the full path. Depth 1 again;
 #   files+dirs for path cmds; dirs only for cd/pushd. Empty dir: insert with trailing space.
+#   Paths are inserted backslash-escaped (my\ dir/) so spaces stay one shell word.
 #   / stays dirs-only. No .. entries. Alt-. toggles hidden names (fzf cannot bind Ctrl-.).
 #   Tab on a file/option/empty-dir inserts it and keeps the picker open for the next token.
 #   Enter inserts the current pick and returns to the shell prompt. Esc leaves the line unchanged.
@@ -234,6 +235,8 @@ HOW TO USE
     List directories only (no man options). Tab into a non-empty
     directory to list its children (depth 1). Empty directory: insert
     with a trailing space for the next argument (e.g. mv /src /dst).
+    Spaces in a path are inserted escaped (my\ dir/) so the shell
+    sees one word.
 
   cd / pushd
     -L/-P options, then directories only (no Tcl man cd noise).
@@ -2180,12 +2183,41 @@ __fzf_zle_token_state() {
   fi
 }
 
+# Filesystem path → one shell word. Backslash-escape spaces and other
+# metacharacters (my\ dir/). Options stay literal (--color[=WHEN]).
+# A leading ~ is left bare so it still expands (~/My\ Dir).
+__fzf_rtfm_shell_quote_path() {
+  setopt localoptions noshwordsplit
+  local p="$1" q
+  [[ -n "$p" ]] || return 0
+  # Flags stay literal. A real file whose name starts with "-" is still a path.
+  if [[ "$p" == -* && "$p" != */* && "$p" != ./* && "$p" != '~'* && ! -e "$p" ]]; then
+    print -r -- "$p"
+    return 0
+  fi
+  q="${(q)p}"
+  if [[ "$p" == '~'* && "$q" == '\~'* ]]; then
+    q="~${q#\\~}"
+  fi
+  print -r -- "$q"
+}
+
+# Undo one level of shell quoting (my\ dir/ or 'my dir/' → my dir/).
+__fzf_rtfm_shell_unquote() {
+  setopt localoptions noshwordsplit
+  local w="$1"
+  [[ -n "$w" ]] || return 0
+  print -r -- "${(Q)w}"
+}
+
 # Join a relative pick onto a typed directory prefix in lastw when needed.
 # Full/absolute picks and picks already under the prefix are left unchanged.
+# The prefix may already be shell-escaped; the result is the raw path.
 __fzf_rtfm_resolve_path_pick() {
   setopt localoptions noshwordsplit
   local picked="$1" prefix="${2-$lastw}" base exp
   [[ -n "$picked" ]] || return 1
+  prefix="$(__fzf_rtfm_shell_unquote "$prefix")"
   if [[ -z "$prefix" || "$picked" == /* ]]; then
     print -r -- "$picked"
     return 0
@@ -2212,6 +2244,7 @@ __fzf_apply_pick() {
   local picked="$1"
   [[ -z "$picked" ]] && return 1
   picked="$(__fzf_rtfm_resolve_path_pick "$picked")"
+  picked="$(__fzf_rtfm_shell_quote_path "$picked")"
   if [[ -z "$prefix_rest" ]]; then
     LBUFFER="${picked} "
   else
@@ -2244,6 +2277,7 @@ __fzf_apply_dir_pick() {
   [[ -z "$picked" ]] && return 1
   picked="$(__fzf_rtfm_resolve_path_pick "$picked")"
   picked="${picked%/}/"
+  picked="$(__fzf_rtfm_shell_quote_path "$picked")"
   if [[ -z "$prefix_rest" ]]; then
     LBUFFER="${picked}"
   else
@@ -2424,11 +2458,12 @@ __fzf_tab_try_command() {
 __fzf_tab_path_token_dir_base() {
   setopt localoptions noshwordsplit extended_glob
   local exp="${1-$lastw}"
+  exp="$(__fzf_rtfm_shell_unquote "$exp")"
   [[ -z "$exp" ]] && exp='.'
   [[ "$exp" == '~'* ]] && exp="${~exp}"
   if [[ -z "$lastw" ]]; then
     dir='.' base=''
-  elif [[ "$lastw" == */ || -d "$exp" ]]; then
+  elif [[ "$exp" == */ || -d "$exp" ]]; then
     dir="$exp" base=''
     [[ -d "$dir" ]] || dir='.'
   elif [[ -n "$exp" ]]; then
@@ -2542,7 +2577,7 @@ __fzf_rtfm_entries_to_man_rows() {
 __fzf_rtfm_filter_used_line_tokens() {
   setopt localoptions noshwordsplit
   local cmdline="${1-}"
-  local usedfile w form
+  local usedfile w form plain strip
   usedfile=$(mktemp "${TMPDIR:-/tmp}/fzf-rtfm-used.XXXXXX") || {
     cat
     return 0
@@ -2560,20 +2595,26 @@ __fzf_rtfm_filter_used_line_tokens() {
     fi
     for w in "${words[@]}"; do
       [[ -n "$w" ]] || continue
+      plain="${(Q)w}"
       if (( !seen_cmd )); then
         if __fzf_rtfm_is_wrapper "$w"; then
           print -r -- "$w"
+          [[ "$plain" != "$w" ]] && print -r -- "$plain"
           continue
         fi
         seen_cmd=1
         print -r -- "$w"
+        [[ "$plain" != "$w" ]] && print -r -- "$plain"
         continue
       fi
       print -r -- "$w"
+      [[ "$plain" != "$w" ]] && print -r -- "$plain"
       form="${w%%\=*}"
       [[ "$form" != "$w" && -n "$form" ]] && print -r -- "$form"
-      if [[ "$w" == */* && "$w" != -* ]]; then
-        print -r -- "${w:t}"
+      if [[ "$plain" == */* && "$plain" != -* ]]; then
+        print -r -- "${plain:t}"
+        strip="${plain#./}"
+        [[ "$strip" != "$plain" && "$strip" != "${plain:t}" ]] && print -r -- "$strip"
       fi
       # Grouped BSD flags (aux, axu) only. A subcommand like "status" is not a cluster.
       if (( keep_repeat )) && [[ "$w" != -* && "$w" == [A-Za-z][A-Za-z]* && ${#w} -ge 2 && ${#w} -le 16 ]]; then
@@ -2587,6 +2628,9 @@ __fzf_rtfm_filter_used_line_tokens() {
     NR == FNR { if ($0 != "") u[$0] = 1; next }
     {
       tok = $1
+      # Whole token first so a path with spaces is not split into words.
+      # ps w stays visible: it may be repeated (www).
+      if (tok != "" && u[tok] && !(keepw && (tok == "w" || tok == "W"))) next
       n = split(tok, forms, /,[ \t]+|[ \t]+/)
       drop = 0
       for (i = 1; i <= n; i++) {
@@ -2608,7 +2652,8 @@ __fzf_rtfm_filter_used_line_tokens() {
 }
 
 __fzf_last_word_is_pathlike() {
-  local w="$1"
+  local w
+  w="$(__fzf_rtfm_shell_unquote "$1")"
   [[ -n "$w" ]] || return 1
   [[ "$w" == /* || "$w" == ./ || "$w" == ./* || "$w" == ../ || "$w" == ../* || "$w" == '~'* || "$w" == */* ]]
 }
@@ -2616,7 +2661,8 @@ __fzf_last_word_is_pathlike() {
 # True when the current token is already a directory path (src/, /, ~/…).
 __fzf_rtfm_is_dir_prefix() {
   setopt localoptions noshwordsplit
-  local w="$lastw" exp
+  local w exp
+  w="$(__fzf_rtfm_shell_unquote "$lastw")"
   [[ -n "$w" ]] || return 1
   # Explicit forms first — do not rely on glob `*/` alone for root `/`.
   case "$w" in
@@ -2740,8 +2786,9 @@ __fzf_tab_immediate_file_rows() {
   local dir="$1" mode="${2:-all}" depth="${3:-1}" hidden="${4:-1}" p name
   [[ -d "$dir" ]] || return 0
   [[ "$depth" =~ ^[0-9]+$ ]] || depth=1
-  local keep_dotslash=0
-  [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
+  local keep_dotslash=0 _lw
+  _lw="$(__fzf_rtfm_shell_unquote "$lastw")"
+  [[ "$_lw" == ./ || "$_lw" == ./* ]] && keep_dotslash=1
   # Offer / from cwd so cat/cd Tab can enter the root without typing it.
   if [[ "$dir" == . || "$dir" == ./ ]]; then
     print -r -- "/"$'\tf\t'"/"
@@ -2790,8 +2837,9 @@ __fzf_pick_mixed() {
   local entries_file filterfile searchstate searcher search_enter search_next search_prev search_esc promptfile
   local preview_out focus_script
   local -a qopts=() expect_opts=() bind_opts=() scheme_opts=() preview_opts=()
-  local keep_dotslash=0
-  [[ "$lastw" == ./ || "$lastw" == ./* ]] && keep_dotslash=1
+  local keep_dotslash=0 _lw
+  _lw="$(__fzf_rtfm_shell_unquote "$lastw")"
+  [[ "$_lw" == ./ || "$_lw" == ./* ]] && keep_dotslash=1
   [[ -n "$query" ]] && qopts=(--query="$query")
   [[ -d "$list_dir" ]] || list_dir='.'
   [[ "$list_depth" =~ ^[0-9]+$ ]] || list_depth=1
@@ -3409,8 +3457,8 @@ __fzf_tab_try_rtfm() {
   fi
   [[ -n "$mixed" ]] || return 1
 
-  q="$lastw"
-  if [[ "$lastw" == / || "$lastw" == */* || "$lastw" == */ ]]; then
+  q="$(__fzf_rtfm_shell_unquote "$lastw")"
+  if [[ "$q" == / || "$q" == */* || "$q" == */ ]]; then
     q="$base"
   fi
   # Complete sub on the token (`docker ps`, `git status`): show its options
