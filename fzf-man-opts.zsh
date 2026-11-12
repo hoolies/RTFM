@@ -445,6 +445,39 @@ __fzf_rtfm_sh_set() {
   print -r -- "$1=$(__fzf_rtfm_sh_sq "$2")"
 }
 
+# Focus script: kind m prints the man description, even when a same-named
+# file exists. Kind f lists the path. Preview text stays in a file, not $SHELL -c.
+__fzf_rtfm_write_focus_script() {
+  local out="$1" manfile="$2" preview_out="$3" state="$4"
+  {
+    print -r '#!/bin/sh'
+    __fzf_rtfm_sh_set manfile "$manfile"
+    __fzf_rtfm_sh_set preview_out "$preview_out"
+    __fzf_rtfm_sh_set statefile "$state"
+    print -r 'tok=$1'
+    print -r 'kind=$2'
+    print -r 'dir=$(sed -n "1p" "$statefile" 2>/dev/null)'
+    print -r '[ -n "$dir" ] || dir=.'
+    print -r 'if [ "$kind" != f ]; then'
+    print -r '  awk -F "\t" -v t="$tok" '\''$1==t { print $3; exit }'\'' "$manfile" > "$preview_out" 2>/dev/null'
+    print -r '  exit 0'
+    print -r 'fi'
+    print -r 'path=$tok'
+    print -r 'if [ "$dir" != . ] && [ "$dir" != ./ ] && [ ! -e "$tok" ] && [ ! -L "$tok" ]; then'
+    print -r '  case "$dir" in'
+    print -r '    /) cand="/$tok" ;;'
+    print -r '    *) cand="$dir/${tok#./}" ;;'
+    print -r '  esac'
+    print -r '  if [ -e "$cand" ] || [ -L "$cand" ]; then path=$cand; fi'
+    print -r 'fi'
+    print -r 'if [ -e "$path" ] || [ -L "$path" ]; then'
+    print -r '  ls -ld -- "$path" > "$preview_out" 2>/dev/null'
+    print -r '  exit 0'
+    print -r 'fi'
+    print -r 'awk -F "\t" -v t="$tok" '\''$1==t { print $3; exit }'\'' "$manfile" > "$preview_out" 2>/dev/null'
+  } >"$out"
+}
+
 # Write Tab transformer (optional searchstate/filterfile/promptfile for options view).
 __fzf_rtfm_write_transformer() {
   local out="$1" state="$2" lister="$3" zoom_mode="$4"
@@ -2934,35 +2967,7 @@ __fzf_pick_mixed() {
       if ($2 == "f") { if ($3 != "") print $3; else print $1; exit }
       print $3; exit
     }' >"$preview_out"
-    {
-      print -r '#!/bin/sh'
-      __fzf_rtfm_sh_set manfile "$manfile"
-      __fzf_rtfm_sh_set preview_out "$preview_out"
-      __fzf_rtfm_sh_set statefile "$state"
-      print -r 'tok=$1'
-      print -r 'kind=$2'
-      print -r 'dir=$(sed -n "1p" "$statefile" 2>/dev/null)'
-      print -r '[ -n "$dir" ] || dir=.'
-      # Command, subcommand, and option rows: the description, even when a
-      # file in this directory has the same name.
-      print -r 'if [ "$kind" != f ]; then'
-      print -r '  awk -F "\t" -v t="$tok" '\''$1==t { print $3; exit }'\'' "$manfile" > "$preview_out" 2>/dev/null'
-      print -r '  exit 0'
-      print -r 'fi'
-      print -r 'path=$tok'
-      print -r 'if [ "$dir" != . ] && [ "$dir" != ./ ] && [ ! -e "$tok" ] && [ ! -L "$tok" ]; then'
-      print -r '  case "$dir" in'
-      print -r '    /) cand="/$tok" ;;'
-      print -r '    *) cand="$dir/${tok#./}" ;;'
-      print -r '  esac'
-      print -r '  if [ -e "$cand" ] || [ -L "$cand" ]; then path=$cand; fi'
-      print -r 'fi'
-      print -r 'if [ -e "$path" ] || [ -L "$path" ]; then'
-      print -r '  ls -ld -- "$path" > "$preview_out" 2>/dev/null'
-      print -r '  exit 0'
-      print -r 'fi'
-      print -r 'awk -F "\t" -v t="$tok" '\''$1==t { print $3; exit }'\'' "$manfile" > "$preview_out" 2>/dev/null'
-    } >"$focus_script"
+    __fzf_rtfm_write_focus_script "$focus_script" "$manfile" "$preview_out" "$state"
     command chmod +x "$focus_script"
     # Preview is ONLY `cat` of a fixed path — no man text in $SHELL -c.
     # Focus updates write the short desc into that file, then refresh.

@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
-# Lightweight unit tests for RTFM helpers (no interactive fzf).
-# Run: zsh tests/rtfm-unit.zsh
+# Functionality suite for RTFM (no interactive fzf).
+# Every change must leave this file green: zsh tests/rtfm-unit.zsh
 emulate -L zsh
 setopt localoptions
 0=${(%):-%x}
@@ -704,6 +704,440 @@ assert_ok 'preview hides .env contents' \
 assert_ok 'preview still shows a normal text file' \
   '[[ "$_note_out" == *hello-preview* ]]'
 command rm -rf -- "$_sec"
+
+# --- command name vs arguments ---
+LBUFFER=''
+assert_ok 'empty line completes a command name' '__fzf_tab_completing_command_name'
+LBUFFER='gi'
+assert_ok 'partial command completes a command name' '__fzf_tab_completing_command_name'
+LBUFFER='git '
+assert_ok 'command plus space is arguments' '! __fzf_tab_completing_command_name'
+LBUFFER='sudo '
+assert_ok 'sudo plus space still completes the command' '__fzf_tab_completing_command_name'
+LBUFFER='sudo ls '
+assert_ok 'sudo ls plus space is arguments' '! __fzf_tab_completing_command_name'
+LBUFFER='./src'
+__fzf_zle_token_state
+assert_ok 'path-shaped first word is still a path' \
+  '__fzf_tab_completing_command_name && __fzf_last_word_is_pathlike "$lastw"'
+_cmd_hits="$(printf '%s\n' git gitk go | __fzf_tab_command_matches gi)"
+assert_ok 'command prefix matches git and gitk' \
+  'print -r -- "$_cmd_hits" | command awk '\''$0=="git"{g=1} $0=="gitk"{k=1} $0=="go"{o=1} END{exit !(g && k && !o)}'\'''
+assert_ok 'shell words include cd and source' \
+  '__fzf_rtfm_cmd_picker_shell_words | command rg -x -q cd && __fzf_rtfm_cmd_picker_shell_words | command rg -x -q source'
+assert_ok 'normalize query collapses spaces' \
+  '[[ "$(__fzf_rtfm_normalize_query "  git   sta  ")" == "git sta" ]]'
+
+# --- wrappers ---
+LBUFFER='command ls -l '
+assert_ok 'command wrapper sees ls' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+LBUFFER='builtin cd '
+assert_ok 'builtin wrapper sees cd' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == cd$'\''\t'\'' ]]'
+LBUFFER='time -f %e ls '
+assert_ok 'time -f sees ls' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+LBUFFER='nohup make '
+assert_ok 'nohup wrapper sees make' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == make$'\''\t'\'' ]]'
+LBUFFER='sudo -- ls '
+assert_ok 'sudo -- ends wrapper options' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+LBUFFER='env FOO=1 BAR=2 ls '
+assert_ok 'env assignments are not the command' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+
+# --- which commands take path arguments ---
+assert_ok 'cp takes files' '__fzf_rtfm_cmd_wants_files cp'
+assert_ok 'mv takes files' '__fzf_rtfm_cmd_wants_files mv'
+assert_ok 'rm takes files' '__fzf_rtfm_cmd_wants_files rm'
+assert_ok 'cp still takes files when the sub looks like a path' \
+  '__fzf_rtfm_cmd_wants_files cp src/'
+unset '__fzf_rtfm_wants_files_cache[git]'
+assert_ok 'git is not a hardcoded path command' \
+  '! __fzf_rtfm_cmd_wants_files git'
+assert_ok 'docker run takes files' '__fzf_rtfm_cmd_wants_files docker run'
+assert_ok 'docker ps does not take files' '! __fzf_rtfm_cmd_wants_files docker ps'
+assert_ok 'usage FILE wants files' \
+  '__fzf_rtfm_text_wants_files "copy <file> <path> <dir> filename"'
+assert_ok 'plain prose does not want files' \
+  '! __fzf_rtfm_text_wants_files "just a message"'
+assert_ok 'compact whitespace' '[[ "$(__fzf_compact_ws "  a   b  ")" == "a b" ]]'
+
+# --- path token classification ---
+lastw=''
+assert_ok 'empty token is not path-only' '! __fzf_rtfm_path_only'
+lastw='--color'
+assert_ok 'an option is not a directory prefix' '! __fzf_rtfm_is_dir_prefix'
+assert_ok 'an option is not pathlike' '! __fzf_last_word_is_pathlike "$lastw"'
+assert_ok 'an option is not path-only' '! __fzf_rtfm_path_only'
+lastw='/'
+assert_ok 'root is a directory prefix' '__fzf_rtfm_is_dir_prefix'
+lastw='./'
+assert_ok 'dot-slash is a directory prefix' '__fzf_rtfm_is_dir_prefix'
+lastw='../'
+assert_ok 'dot-dot-slash is a directory prefix' '__fzf_rtfm_is_dir_prefix'
+assert_ok 'tilde is pathlike' '__fzf_last_word_is_pathlike "~"'
+assert_ok 'quote leaves a builtin name alone' \
+  '[[ "$(__fzf_rtfm_shell_quote_path "[[")" == "[[" ]]'
+assert_ok 'quote leaves g++ alone' \
+  '[[ "$(__fzf_rtfm_shell_quote_path "g++")" == "g++" ]]'
+assert_ok 'quote leaves a long option with a placeholder alone' \
+  '[[ "$(__fzf_rtfm_shell_quote_path "--exec-path[=<path>]")" == "--exec-path[=<path>]" ]]'
+assert_ok 'empty pick is rejected' '! __fzf_apply_pick ""'
+
+# --- inserting a row ---
+assert_ok 'first option form keeps the short flag' \
+  '[[ "$(__fzf_rtfm_first_option_form "-A, --all")" == "-A" ]]'
+assert_ok 'spaced option form keeps the short flag' \
+  '[[ "$(__fzf_rtfm_first_option_form "-A --all")" == "-A" ]]'
+assert_ok 'a single long option stays whole' \
+  '[[ "$(__fzf_rtfm_first_option_form "--verbose")" == "--verbose" ]]'
+assert_ok 'an option with a value stays whole' \
+  '[[ "$(__fzf_rtfm_first_option_form "-C <path>")" == "-C <path>" ]]'
+assert_ok 'a subcommand is not rewritten' \
+  '[[ "$(__fzf_rtfm_first_option_form status)" == status ]]'
+prefix_rest='ls'
+LBUFFER='ls '
+lastw=''
+__fzf_apply_mixed_pick $'-A, --all\tm\talmost all'
+assert_ok 'mixed option pick inserts the short flag' \
+  '[[ "$LBUFFER" == "ls -A " ]]'
+prefix_rest='git'
+LBUFFER='git '
+lastw=''
+__fzf_apply_mixed_pick $'status\tm\tshow the working tree'
+assert_ok 'mixed subcommand pick does not add a slash' \
+  '[[ "$LBUFFER" == "git status " ]]'
+LBUFFER='ps au'
+prefix_rest='ps'
+lastw='au'
+__fzf_apply_mixed_pick $'x\tm\tprocesses'
+assert_ok 'mixed BSD letter extends the cluster' \
+  '[[ "$LBUFFER" == "ps aux" ]]'
+LBUFFER='keep'
+prefix_rest='keep'
+assert_ok 'fzf abort leaves the line' \
+  '__fzf_tab_finish_fzf_pick 2 nope __fzf_apply_pick && [[ "$LBUFFER" == keep ]]'
+assert_ok 'fzf failure leaves the line' \
+  '! __fzf_tab_finish_fzf_pick 1 nope __fzf_apply_pick && [[ "$LBUFFER" == keep ]]'
+assert_ok 'empty fzf pick leaves the line' \
+  '__fzf_tab_finish_fzf_pick 0 "" __fzf_apply_pick && [[ "$LBUFFER" == keep ]]'
+
+# --- directory and file arguments ---
+_fx=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-fn.XXXXXX")
+mkdir -p "$_fx/subdir/nested" "$_fx/empty" "$_fx/build"
+print -r -- 'note-body' >"$_fx/note.txt"
+print -r -- 'secret' >"$_fx/.secret"
+print -r -- 'built' >"$_fx/build/out"
+print -r -- 'child' >"$_fx/srcfile"
+mkdir -p "$_fx/src"
+print -r -- 'inside' >"$_fx/src/file"
+prefix_rest='cp'
+LBUFFER='cp '
+lastw=''
+__fzf_apply_mixed_pick $'note.txt\tf\t'"$_fx/note.txt"
+assert_ok 'mixed file pick inserts the path and a space' \
+  '[[ "$LBUFFER" == "cp '"$_fx"'/note.txt " ]]'
+prefix_rest='cp'
+LBUFFER='cp '
+lastw=''
+__fzf_apply_mixed_pick $'subdir\tf\t'"$_fx/subdir"
+assert_ok 'mixed dir pick for cp finishes the argument' \
+  '[[ "$LBUFFER" == "cp '"$_fx"'/subdir/ " ]]'
+prefix_rest='cd'
+LBUFFER='cd '
+lastw=''
+__fzf_apply_mixed_pick $'subdir\tf\t'"$_fx/subdir"
+assert_ok 'mixed dir pick for cd stays open' \
+  '[[ "$LBUFFER" == "cd '"$_fx"'/subdir/" ]]'
+prefix_rest='mv'
+LBUFFER='mv '
+lastw=''
+__fzf_apply_dir_pick 'src'
+assert_ok 'mv dir pick finishes the argument' '[[ "$LBUFFER" == "mv src/ " ]]'
+prefix_rest='rm'
+LBUFFER='rm '
+lastw=''
+__fzf_apply_dir_pick 'src'
+assert_ok 'rm dir pick finishes the argument' '[[ "$LBUFFER" == "rm src/ " ]]'
+prefix_rest='mkdir'
+LBUFFER='mkdir '
+lastw=''
+__fzf_apply_dir_pick 'newname'
+assert_ok 'mkdir dir pick finishes the argument' '[[ "$LBUFFER" == "mkdir newname/ " ]]'
+prefix_rest='cp'
+LBUFFER='cp '
+lastw=''
+__fzf_apply_pick 'empty/'
+assert_ok 'empty directory insert has a trailing space' \
+  '[[ "$LBUFFER" == "cp empty/ " ]]'
+_spaced_file="$(cd "$_fx" && __fzf_rtfm_shell_quote_path "note.txt")"
+assert_ok 'plain existing file is not over-quoted' '[[ "$_spaced_file" == note.txt ]]'
+print -r -- x >"$_fx/my file.txt"
+_spaced_file="$(cd "$_fx" && __fzf_rtfm_shell_quote_path "my file.txt")"
+assert_ok 'existing spaced file is escaped' '[[ "$_spaced_file" == "my\\ file.txt" ]]'
+
+# --- listings ---
+_dirs="$(__fzf_rtfm_list_paths "$_fx" dirs 1 1)"
+assert_ok 'dirs mode skips files' '[[ "$_dirs" != *note.txt && "$_dirs" == *subdir* ]]'
+_hidden="$(__fzf_rtfm_list_paths "$_fx" all 1 0)"
+assert_ok 'hidden mode off skips dotfiles' '[[ "$_hidden" != *.secret* ]]'
+_shown="$(__fzf_rtfm_list_paths "$_fx" all 1 1)"
+assert_ok 'hidden mode on includes dotfiles' '[[ "$_shown" == *.secret* ]]'
+_rows="$(lastw='' && __fzf_tab_immediate_file_rows "$_fx" all 1 1)"
+assert_ok 'listings do not offer ..' \
+  '[[ "$_rows" != *$'\''\t..\t'\''* && "$_rows" != ..$'\''\t'\''* ]]'
+assert_ok 'non-empty directory has entries' \
+  '__fzf_rtfm_dir_has_entries "'"$_fx"'/subdir" all 1'
+assert_ok 'empty directory has no entries' \
+  '! __fzf_rtfm_dir_has_entries "'"$_fx"'/empty" all 1'
+assert_ok 'a file is not a directory listing' \
+  '! __fzf_rtfm_dir_has_entries "'"$_fx"'/note.txt" all 1'
+_dot="$(cd "$_fx" && lastw='./' && __fzf_tab_immediate_file_rows . all 1 1)"
+assert_ok 'typed ./ keeps the dot-slash on the row' \
+  'print -r -- "$_dot" | command awk -F "\t" '\''$1=="./subdir" && $3=="./subdir" {found=1} END{exit !found}'\'''
+lastw="$_fx/note.txt"
+__fzf_tab_path_token_dir_base
+assert_ok 'path token splits directory and base' \
+  '[[ "$dir" == "'"$_fx"'" && "$base" == note.txt ]]'
+lastw="$_fx/"
+__fzf_tab_path_token_dir_base
+assert_ok 'directory token has an empty base' \
+  '[[ "$dir" == "'"$_fx"'/" || "$dir" == "'"$_fx"'" ]] && [[ -z "$base" ]]'
+lastw=''
+__fzf_tab_path_token_dir_base
+assert_ok 'empty token lists the cwd' '[[ "$dir" == . && -z "$base" ]]'
+
+_rb=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-rb.XXXXXX")
+LBUFFER='cp src/'
+lastw='src/'
+prefix_rest='cp'
+( cd "$_fx" && __fzf_rtfm_tab_continue_rebuild "$_rb" all 'cp > ' )
+assert_ok 'cp src/ hides man options' \
+  '[[ -z "$(command tr -d "[:space:]" <"$_rb/man_rows")" ]]'
+assert_ok 'cp src/ still lists the file inside' \
+  'command awk -F "\t" '\''$1=="file" && $2=="f" {found=1} END{exit !found}'\'' "$_rb/file_rows"'
+command rm -rf "$_rb"
+
+# --- zoom, preview, and hidden toggle ---
+_st=$(mktemp "${TMPDIR:-/tmp}/rtfm-st.XXXXXX")
+_man=$(mktemp "${TMPDIR:-/tmp}/rtfm-mn.XXXXXX")
+_tr=$(mktemp "${TMPDIR:-/tmp}/rtfm-tr.XXXXXX")
+_tg=$(mktemp "${TMPDIR:-/tmp}/rtfm-tg.XXXXXX")
+_ls=$(mktemp "${TMPDIR:-/tmp}/rtfm-ls.XXXXXX")
+_pout=$(mktemp "${TMPDIR:-/tmp}/rtfm-pout.XXXXXX")
+_focus=$(mktemp "${TMPDIR:-/tmp}/rtfm-focus.XXXXXX")
+{
+  print -r -- "$_fx"
+  print -r -- 1
+  print -r -- 1
+  print -r -- 1
+  print -r -- all
+} >"$_st"
+print -r -- $'build\tm\tcompile the project\nstatus\tm\tshow status' >"$_man"
+__fzf_rtfm_write_transformer "$_tr" "$_st" "$_ls" all
+__fzf_rtfm_write_toggler "$_tg" "$_st" "$_ls"
+__fzf_rtfm_write_focus_script "$_focus" "$_man" "$_pout" "$_st"
+command chmod +x "$_tr" "$_tg" "$_focus"
+_zoom="$(command sh "$_tr" build m)"
+assert_ok 'Tab on a subcommand accepts it' '[[ "$_zoom" == accept ]]'
+assert_ok 'Tab on a subcommand does not enter a same-named directory' \
+  '[[ "$(command sed -n 1p "$_st")" == "'"$_fx"'" ]]'
+_zoom="$(command sh "$_tr" "$_fx/note.txt" f)"
+assert_ok 'Tab on a file accepts it' '[[ "$_zoom" == accept ]]'
+_zoom="$(command sh "$_tr" "$_fx/empty" f)"
+assert_ok 'Tab on an empty directory accepts it' '[[ "$_zoom" == accept ]]'
+_zoom="$(command sh "$_tr" "$_fx/subdir" f)"
+assert_ok 'Tab on a non-empty directory zooms' '[[ "$_zoom" == reload* ]]'
+assert_ok 'zoom drops man rows' '[[ "$(command sed -n 4p "$_st")" == 0 ]]'
+assert_ok 'zoom state is the directory' \
+  '[[ "$(command sed -n 1p "$_st")" == "'"$_fx"'/subdir" ]]'
+{
+  print -r -- "$_fx"
+  print -r -- 1
+  print -r -- 1
+  print -r -- 1
+  print -r -- all
+} >"$_st"
+_tog="$(command sh "$_tg")"
+assert_ok 'Alt-. reloads the list' '[[ "$_tog" == reload* ]]'
+assert_ok 'Alt-. flips hidden off' '[[ "$(command sed -n 2p "$_st")" == 0 ]]'
+command sh "$_focus" build m
+_focus_out="$(command cat -- "$_pout")"
+assert_ok 'preview of a subcommand is its description' \
+  '[[ "$_focus_out" == "compile the project" ]]'
+assert_ok 'preview of a subcommand is not the file' \
+  '[[ "$_focus_out" != *built* ]]'
+command sh "$_focus" "$_fx/note.txt" f
+_focus_out="$(command cat -- "$_pout")"
+assert_ok 'preview of a file is ls output' \
+  '[[ "$_focus_out" == *note.txt* ]]'
+_descf=$(mktemp "${TMPDIR:-/tmp}/rtfm-desc.XXXXXX")
+print -r -- $'build\tm\tcompile the project' >"$_descf"
+_prev="$("$__fzf_rtfm_preview_script" build m "$_descf")"
+assert_ok 'preview script uses the description for kind m' \
+  '[[ "$_prev" == "compile the project" ]]'
+command rm -f "$_descf"
+
+# --- help and key contracts ---
+_help="$(__fzf_rtfm_print_help)"
+assert_ok 'help says Enter does not run the command' \
+  '[[ "$_help" == *"does not run the command"* ]]'
+assert_ok 'help says a path command finishes a directory argument' \
+  '[[ "$_help" == *"cp src dst"* ]]'
+assert_ok 'help says cd and pushd leave the slash open' \
+  '[[ "$_help" == *"cd and pushd leave the slash"* ]]'
+assert_ok 'help says spaces are escaped' \
+  '[[ "$_help" == *"my\\ dir/"* ]]'
+assert_ok 'mixed picker Tab is not a plain accept' \
+  '[[ "${__fzf_rtfm_fzf_binds_preview_nav[*]}" != *tab:accept* ]]'
+assert_ok 'Esc aborts the picker' \
+  '[[ "${__fzf_rtfm_fzf_binds_preview_nav[*]}" == *esc:abort* ]]'
+assert_ok 'picker binds do not run the command line' \
+  '[[ "${__fzf_rtfm_fzf_binds_basic[*]}" != *enter:execute* && "${__fzf_rtfm_fzf_binds_basic[*]}" != *tab:execute* && "${__fzf_rtfm_fzf_binds_preview_nav[*]}" != *enter:execute* && "${__fzf_rtfm_fzf_binds_preview_nav[*]}" != *tab:execute* ]]'
+if command fzf --help 2>/dev/null | command rg -q -- '--with-shell'; then
+  assert_ok 'fzf children use the POSIX shell' \
+    '[[ "${__fzf_rtfm_with_shell[*]}" == */bin/sh\ -c* ]]'
+fi
+if functions __fzf_pick_mixed | command rg -F -q -- '[ "$kind" = m ] || continue'; then
+  print -r -- "ok  - ctrl-f search skips non-option rows"
+  PASS=$((PASS + 1))
+else
+  print -r -- "FAIL- ctrl-f search skips non-option rows"
+  FAIL=$((FAIL + 1))
+fi
+_sqset="$(__fzf_rtfm_sh_set name "a'b")"
+if [[ "$_sqset" == "name='a'\\''b'" ]]; then
+  print -r -- "ok  - sh assignment quotes an apostrophe"
+  PASS=$((PASS + 1))
+else
+  print -r -- "FAIL- sh assignment quotes an apostrophe (got $_sqset)"
+  FAIL=$((FAIL + 1))
+fi
+
+if man -k '^git-' >/dev/null 2>&1; then
+  _gitsubs="$(__fzf_parse_man_subcommands git 2>/dev/null)" || _gitsubs=""
+  assert_ok 'git man subcommands include status' \
+    '[[ "$_gitsubs" == *status* ]]'
+else
+  print -r -- "skip- git man -k subcommands"
+fi
+
+command rm -rf -- "$_fx"
+command rm -f "$_st" "$_man" "$_tr" "$_tg" "$_ls" "$_pout" "$_focus"
+
+# --- commands, subcommands, arguments, options, paths, wrappers ---
+assert_ok 'wrappers: the eight wrappers are recognized' \
+  '__fzf_rtfm_is_wrapper sudo && __fzf_rtfm_is_wrapper doas && __fzf_rtfm_is_wrapper command && __fzf_rtfm_is_wrapper builtin && __fzf_rtfm_is_wrapper env && __fzf_rtfm_is_wrapper time && __fzf_rtfm_is_wrapper nice && __fzf_rtfm_is_wrapper nohup'
+assert_ok 'wrappers: a real command is not a wrapper' \
+  '! __fzf_rtfm_is_wrapper git && ! __fzf_rtfm_is_wrapper cp && ! __fzf_rtfm_is_wrapper ls'
+LBUFFER='sudo git'
+assert_ok 'commands: sudo git is still the command name' '__fzf_tab_completing_command_name'
+LBUFFER='sudo git '
+assert_ok 'commands: sudo git plus space is past the command' '! __fzf_tab_completing_command_name'
+prefix_rest=''
+lastw=''
+__fzf_apply_pick 'nosuchcmd'
+assert_ok 'commands: a command is inserted as one word plus a space' \
+  '[[ "$LBUFFER" == "nosuchcmd " ]]'
+_ec=0
+_out="$(__fzf_build_entries rtfm-no-such-cmd-xyz '' 2>/dev/null)" || _ec=$?
+assert_ok 'commands: an unknown command fails' '[[ $_ec -ne 0 && -z "$_out" ]]'
+if __fzf_man_topic_exists ls; then
+  _lsroot="$(__fzf_build_entries ls '' 2>/dev/null)" || _lsroot=""
+  assert_ok 'commands: ls offers options' \
+    '[[ "$_lsroot" == *"-l"* || "$_lsroot" == *"--all"* || "$_lsroot" == *"-a"* ]]'
+else
+  print -r -- "skip- ls man page"
+fi
+
+LBUFFER='git status README'
+assert_ok 'subcommands: a later argument does not replace the subcommand' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''status ]]'
+LBUFFER='git -- status'
+assert_ok 'subcommands: -- does not hide the subcommand' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''status ]]'
+LBUFFER='sudo -u root git status'
+assert_ok 'subcommands: a wrapper still sees the subcommand' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''status ]]'
+prefix_rest='git'
+lastw=''
+__fzf_apply_pick 'status'
+assert_ok 'subcommands: a subcommand is inserted literally' \
+  '[[ "$LBUFFER" == "git status " ]]'
+assert_ok 'subcommands: a path is not a finished subcommand' \
+  '! __fzf_rtfm_sub_token_complete cp src src "cp src"'
+if __fzf_man_topic_exists git && __fzf_man_topic_exists git-status; then
+  _gitroot="$(__fzf_build_entries git '' 2>/dev/null)" || _gitroot=""
+  assert_ok 'subcommands: git offers status' \
+    '[[ "$_gitroot" == status$'\''\t'\''* || "$_gitroot" == *$'\''\n'\''status$'\''\t'\''* ]]'
+  _gitst="$(__fzf_build_entries git status 2>/dev/null)" || _gitst=""
+  assert_ok 'options: git status offers options' \
+    '[[ "$_gitst" == *"--"* ]]'
+else
+  print -r -- "skip- git status man page"
+fi
+
+LBUFFER='ls -l'
+__fzf_zle_token_state
+assert_ok 'options: a flag is not the subcommand' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+assert_ok 'options: a flag is not a path' \
+  '[[ "$lastw" == "-l" ]] && ! __fzf_rtfm_path_only'
+LBUFFER='git status --short'
+assert_ok 'options: a flag after a subcommand leaves the subcommand' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''status ]]'
+LBUFFER='git commit -m msg'
+assert_ok 'arguments: a message is not the subcommand' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''commit ]]'
+LBUFFER='cp src dest'
+assert_ok 'arguments: the first path is kept and the second does not replace it' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == cp$'\''\t'\''src ]]'
+LBUFFER='cp src dest '
+__fzf_zle_token_state
+assert_ok 'arguments: a finished path leaves the next slot empty' \
+  '[[ -z "$lastw" ]] && ! __fzf_rtfm_path_only && ! __fzf_tab_completing_command_name'
+_optrows=$'--all\tm\tall\n-l\tm\tlong'
+_optout="$(print -r -- "$_optrows" | __fzf_rtfm_filter_used_line_tokens 'ls --all src/')"
+assert_ok 'options: a used option stays hidden beside a path' \
+  '[[ "$_optout" != *"--all"* ]]'
+assert_ok 'options: an unused option stays beside a path' \
+  'print -r -- "$_optout" | command awk -F "\t" '\''$1=="-l"{found=1} END{exit !found}'\'''
+
+LBUFFER='cp my\ dir/'
+__fzf_zle_token_state
+assert_ok 'paths: an escaped directory is still the argument' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == cp$'\''\tmy dir/'\'' ]]'
+assert_ok 'paths: an escaped directory is a directory prefix' \
+  '__fzf_rtfm_is_dir_prefix && __fzf_rtfm_path_only'
+LBUFFER='cp /tmp/file'
+__fzf_zle_token_state
+assert_ok 'paths: an absolute path is path-only' \
+  '__fzf_last_word_is_pathlike "$lastw" && __fzf_rtfm_path_only'
+assert_ok 'paths: an absolute path does not replace the command' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == cp$'\''\t'\''/tmp/file ]]'
+
+LBUFFER='doas git status'
+assert_ok 'wrappers: doas sees the real command and subcommand' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''status ]]'
+LBUFFER='env -u PATH ls'
+assert_ok 'wrappers: env -u sees ls' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+LBUFFER='nice -10 make'
+assert_ok 'wrappers: nice -10 sees make' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == make$'\''\t'\'' ]]'
+LBUFFER='command -- ls'
+assert_ok 'wrappers: command -- sees ls' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+LBUFFER='sudo command ls -l'
+assert_ok 'wrappers: stacked wrappers see ls' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == ls$'\''\t'\'' ]]'
+LBUFFER='sudo -u root git status --short src/'
+__fzf_zle_token_state
+assert_ok 'wrappers: one line keeps command, subcommand, option, and path' \
+  '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''status && "$lastw" == "src/" ]] && __fzf_rtfm_path_only && ! __fzf_tab_completing_command_name'
 
 print -r -- ""
 print -r -- "passed=$PASS failed=$FAIL"
