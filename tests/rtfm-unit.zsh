@@ -954,6 +954,8 @@ assert_ok 'Tab on a non-empty directory zooms' '[[ "$_zoom" == reload* ]]'
 assert_ok 'zoom drops man rows' '[[ "$(command sed -n 4p "$_st")" == 0 ]]'
 assert_ok 'zoom state is the directory' \
   '[[ "$(command sed -n 1p "$_st")" == "'"$_fx"'/subdir" ]]'
+assert_ok 'Tab lock walks the subtree' \
+  '[[ "$(command sed -n 3p "$_st")" == "$__fzf_rtfm_tree_depth" ]]'
 {
   print -r -- "$_fx"
   print -r -- 1
@@ -1138,6 +1140,70 @@ LBUFFER='sudo -u root git status --short src/'
 __fzf_zle_token_state
 assert_ok 'wrappers: one line keeps command, subcommand, option, and path' \
   '[[ "$(__fzf_get_cmd_and_sub)" == git$'\''\t'\''status && "$lastw" == "src/" ]] && __fzf_rtfm_path_only && ! __fzf_tab_completing_command_name'
+
+# --- cp: bare names start at cwd; slash locks; Tab locks a subdirectory ---
+assert_ok 'paths: a bare name is not an explicit path' \
+  '! __fzf_rtfm_path_is_explicit src'
+assert_ok 'paths: a slash path is explicit' \
+  '__fzf_rtfm_path_is_explicit src/'
+assert_ok 'paths: a tilde path is explicit' \
+  '__fzf_rtfm_path_is_explicit "~/src"'
+_keep="$(print -r -- $'src\tf\tsrc\nnote\tf\tnote' | __fzf_rtfm_filter_used_line_tokens 'cp src')"
+assert_ok 'paths: the path being typed stays selectable' \
+  'print -r -- "$_keep" | command awk -F "\t" '\''$1=="src"{found=1} END{exit !found}'\'''
+_done="$(print -r -- $'src\tf\tsrc\nnote\tf\tnote' | __fzf_rtfm_filter_used_line_tokens 'cp src ')"
+assert_ok 'paths: a finished path is not offered again' \
+  '! print -r -- "$_done" | command awk -F "\t" '\''$1=="src"{found=1} END{exit !found}'\'''
+
+_tree=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-tree.XXXXXX")
+mkdir -p "$_tree/work/src/nested" "$_tree/out"
+print -r -- x >"$_tree/work/note"
+print -r -- x >"$_tree/work/src/nested/deep"
+LBUFFER='cp src'
+lastw='src'
+prefix_rest='cp'
+( cd "$_tree/work" && __fzf_rtfm_tab_continue_rebuild "$_tree/out" all 'cp > ' )
+assert_ok 'cp bare directory name starts at the cwd' \
+  '[[ "$(command cat -- "$_tree/out/list_dir")" == . ]]'
+assert_ok 'cp bare name still lists a sibling file' \
+  'command awk -F "\t" '\''$1=="note" && $2=="f" {found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+assert_ok 'cp bare name lists the directory, not its contents' \
+  'command awk -F "\t" '\''$1=="src" {found=1} END{exit !found}'\'' "$_tree/out/file_rows" && ! command awk -F "\t" '\''$1=="src/nested/deep" {found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+command rm -rf "$_tree/out"
+mkdir -p "$_tree/out"
+LBUFFER='cp src/'
+lastw='src/'
+prefix_rest='cp'
+( cd "$_tree/work" && __fzf_rtfm_tab_continue_rebuild "$_tree/out" all 'cp > ' )
+assert_ok 'cp src/ locks that directory' \
+  '[[ "$(command cat -- "$_tree/out/list_dir")" == src || "$(command cat -- "$_tree/out/list_dir")" == src/ ]]'
+assert_ok 'cp src/ fuzzy-matches inside its subdirectories' \
+  'command awk -F "\t" '\''$1=="nested/deep" {found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+mkdir -p "$_tree/work/src/nested/inner"
+print -r -- x >"$_tree/work/src/file"
+command rm -rf "$_tree/out"
+mkdir -p "$_tree/out"
+LBUFFER='cd src'
+lastw='src'
+prefix_rest='cd'
+( cd "$_tree/work" && __fzf_rtfm_tab_continue_rebuild "$_tree/out" dirs 'cd > ' )
+assert_ok 'cd bare directory name starts at the cwd' \
+  '[[ "$(command cat -- "$_tree/out/list_dir")" == . ]]'
+assert_ok 'cd bare name lists directories only' \
+  'command awk -F "\t" '\''$1=="src"{found=1} END{exit !found}'\'' "$_tree/out/file_rows" && ! command awk -F "\t" '\''$1=="note"{found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+command rm -rf "$_tree/out"
+mkdir -p "$_tree/out"
+LBUFFER='cd src/'
+lastw='src/'
+prefix_rest='cd'
+( cd "$_tree/work" && __fzf_rtfm_tab_continue_rebuild "$_tree/out" dirs 'cd > ' )
+assert_ok 'cd src/ locks that directory' \
+  '[[ "$(command cat -- "$_tree/out/list_dir")" == src || "$(command cat -- "$_tree/out/list_dir")" == src/ ]]'
+assert_ok 'cd src/ fuzzy-matches nested directories' \
+  'command awk -F "\t" '\''$1=="nested/inner"{found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+assert_ok 'cd src/ does not list files' \
+  '! command awk -F "\t" '\''$1=="file"{found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+command rm -rf "$_tree"
 
 print -r -- ""
 print -r -- "passed=$PASS failed=$FAIL"
