@@ -54,8 +54,10 @@ assert_ok 'resolve unchanged without prefix' \
 # --- paths with spaces are one shell word (backslash-escaped) ---
 assert_ok 'quote escapes spaces in a directory' \
   '[[ "$(__fzf_rtfm_shell_quote_path "/this is an example/")" == "/this\\ is\\ an\\ example/" ]]'
-assert_ok 'quote leaves a plain path alone' \
-  '[[ "$(__fzf_rtfm_shell_quote_path src/file)" == src/file ]]'
+assert_ok 'quote leaves a command or subcommand alone' \
+  '[[ "$(__fzf_rtfm_shell_quote_path nosuchcmd)" == nosuchcmd && "$(__fzf_rtfm_shell_quote_path "no-such&sub")" == "no-such&sub" ]]'
+assert_ok 'quote escapes & in a directory path' \
+  '[[ "$(__fzf_rtfm_shell_quote_path "L&D/")" == "L\\&D/" ]]'
 assert_ok 'quote leaves an option alone' \
   '[[ "$(__fzf_rtfm_shell_quote_path "--color[=WHEN]")" == "--color[=WHEN]" ]]'
 assert_ok 'quote keeps a leading tilde expandable' \
@@ -69,9 +71,29 @@ lastw='src/my\ dir/'
 assert_ok 'resolve joins onto an escaped directory prefix' \
   '[[ "$(__fzf_rtfm_resolve_path_pick child)" == "src/my dir/child" ]]'
 prefix_rest='cd'
+LBUFFER='cd '
 __fzf_apply_dir_pick '/this is an example'
 assert_ok 'dir pick inserts an escaped directory with a trailing slash' \
   '[[ "$LBUFFER" == "cd /this\\ is\\ an\\ example/" ]]'
+prefix_rest='cp'
+LBUFFER='cp '
+lastw=''
+__fzf_apply_dir_pick 'my dir'
+assert_ok 'cp dir pick finishes the argument' \
+  '[[ "$LBUFFER" == "cp my\\ dir/ " ]]'
+__fzf_zle_token_state
+assert_ok 'cp dir pick is not a directory prefix' \
+  '[[ -z "$lastw" ]]'
+prefix_rest='sudo cp'
+LBUFFER='sudo cp '
+__fzf_apply_dir_pick 'L&D'
+assert_ok 'sudo cp dir pick escapes and finishes the argument' \
+  '[[ "$LBUFFER" == "sudo cp L\\&D/ " ]]'
+prefix_rest='pushd'
+LBUFFER='pushd '
+__fzf_apply_dir_pick 'mydir'
+assert_ok 'pushd dir pick stays open' \
+  '[[ "$LBUFFER" == "pushd mydir/" ]]'
 prefix_rest='cat'
 lastw=''
 __fzf_apply_pick './my file.txt'
@@ -88,6 +110,14 @@ assert_ok 'escaped directory is still a directory prefix' \
   '__fzf_rtfm_is_dir_prefix'
 assert_ok 'escaped directory is pathlike' \
   '__fzf_last_word_is_pathlike "$lastw"'
+LBUFFER='git my\ sub '
+_cmdsub="$(__fzf_get_cmd_and_sub)"
+assert_ok 'help lookup unquotes an escaped subcommand' \
+  '[[ "${_cmdsub#*$'\''\t'\''}" == "my sub" ]]'
+LBUFFER='git status'
+__fzf_zle_token_state
+assert_ok 'quoted subcommand word still counts as complete' \
+  '__fzf_rtfm_sub_token_complete git status "'\''status'\''" "git status"'
 _space_rows=$'my file\tf\t./my file'
 _space_out="$(print -r -- "$_space_rows" | __fzf_rtfm_filter_used_line_tokens 'cat ./my\ file ')"
 assert_ok 'used-token filter drops an escaped path' \
@@ -548,6 +578,19 @@ prefix_rest='cd'
 assert_ok 'rebuild cd src/ is dirs mode' '[[ "$(command cat -- "$_rb/out/list_mode")" == dirs ]]'
 assert_ok 'rebuild list_dir is src' \
   '[[ "$(command cat -- "$_rb/out/list_dir")" == src || "$(command cat -- "$_rb/out/list_dir")" == src/ || "$(command cat -- "$_rb/out/list_dir")" == ./src ]]'
+command rm -rf "$_rb"
+
+_rb=$(mktemp -d "${TMPDIR:-/tmp}/rtfm-rb.XXXXXX")
+mkdir -p "$_rb/fixture/src/nested" "$_rb/out"
+print -r -- x >"$_rb/fixture/src/file"
+LBUFFER='cp src/'
+lastw='src/'
+prefix_rest='cp'
+( cd "$_rb/fixture" && __fzf_rtfm_tab_continue_rebuild "$_rb/out" all 'cp > ' )
+assert_ok 'rebuild cp src/ lists files and directories' \
+  '[[ "$(command cat -- "$_rb/out/list_mode")" == all ]]'
+assert_ok 'rebuild cp src/ includes the file' \
+  'command awk -F "\t" '\''$1=="file" && $2=="f" {found=1} END{exit !found}'\'' "$_rb/out/file_rows"'
 command rm -rf "$_rb"
 
 # --- generated lister matches immediate_file_rows shape ---

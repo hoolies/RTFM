@@ -42,11 +42,11 @@
 #   looks like it takes a path. Token starting with "-" is options only.
 # - cd/pushd after a space: zsh -L/-P, then directories only (not Tcl man / man -k ^cd-). No .. entries.
 # - Cwd with no directory prefix: one-level files/dirs (plus /) mixed with man options.
-#   Typed directory (src/, /): paths only (no man options/args), directories only at depth 1.
-#   Tab into a non-empty directory: show that directory's immediate children as
-#   names only (not parent/child); insert still uses the full path. Depth 1 again;
-#   files+dirs for path cmds; dirs only for cd/pushd. Empty dir: insert with trailing space.
-#   Paths are inserted backslash-escaped (my\ dir/) so spaces stay one shell word.
+#   Typed directory (src/, /): paths only (no man options/args), depth 1.
+#   cd/pushd list directories only. Path commands (cp, mv, …) list files and directories.
+#   Tab into a non-empty directory: immediate children, names only; insert uses the full path.
+#   Enter on a directory for a path command inserts it with a trailing space (next argument).
+#   cd/pushd leave the slash open. Paths are inserted backslash-escaped (my\ dir/).
 #   / stays dirs-only. No .. entries. Alt-. toggles hidden names (fzf cannot bind Ctrl-.).
 #   Tab on a file/option/empty-dir inserts it and keeps the picker open for the next token.
 #   Enter inserts the current pick and returns to the shell prompt. Esc leaves the line unchanged.
@@ -232,10 +232,12 @@ HOW TO USE
     when the command takes paths. A token starting with - is options only.
 
   Typed directory (src/, /)
-    List directories only (no man options). Tab into a non-empty
-    directory to list its children (depth 1). Empty directory: insert
-    with a trailing space for the next argument (e.g. mv /src /dst).
-    Spaces in a path are inserted escaped (my\ dir/) so the shell
+    List that directory (no man options). cd and pushd list directories
+    only. cp, mv, and other path commands list files and directories.
+    Tab into a non-empty directory to list its children (depth 1).
+    Enter on a directory inserts it with a trailing space so the next
+    Tab is the next argument (cp src dst). cd and pushd leave the slash
+    open. Spaces in a path are inserted escaped (my\ dir/) so the shell
     sees one word.
 
   cd / pushd
@@ -456,8 +458,14 @@ __fzf_rtfm_write_transformer() {
     [[ -n "$filterfile" ]] && __fzf_rtfm_sh_set filterfile "$filterfile"
     [[ -n "$promptfile" ]] && __fzf_rtfm_sh_set promptfile "$promptfile"
     print -r 'tok=$1'
+    print -r 'kind=$2'
     print -r 'dir=$(sed -n "1p" "$statefile")'
     print -r '[ -n "$dir" ] || dir=.'
+    # A command or subcommand is inserted; do not zoom into a same-named directory.
+    print -r 'if [ "$kind" = m ]; then'
+    print -r '  printf "accept\n"'
+    print -r '  exit 0'
+    print -r 'fi'
     print -r 'if [ ! -d "$tok" ]; then'
     print -r '  case "$dir" in'
     print -r '    /) cand="/$tok" ;;'
@@ -1708,13 +1716,13 @@ __fzf_get_cmd_and_sub() {
   [[ "$scan" == cmd\ * ]] || return 1
   start_idx="${scan#cmd }"
 
-  local cmd="${words[start_idx]}"
-  local sub=""
-  local i
+  local cmd sub="" i
+  # Line words may be backslash-escaped (L\&D). Help lookup needs the real name.
+  cmd="$(__fzf_rtfm_shell_unquote "${words[start_idx]}")"
   if ! __fzf_rtfm_cmd_clusters_bsd "$cmd"; then
     for (( i = start_idx + 1; i <= ${#words}; i++ )); do
       [[ "${words[i]}" == -* ]] && continue
-      sub="${words[i]}"
+      sub="$(__fzf_rtfm_shell_unquote "${words[i]}")"
       break
     done
   fi
@@ -1958,6 +1966,8 @@ __fzf_rtfm_root_token_known() {
 # the query against the root list.
 __fzf_rtfm_sub_token_complete() {
   local cmd="$1" sub="$2" lastw="$3" full="${4-}"
+  lastw="$(__fzf_rtfm_shell_unquote "$lastw")"
+  sub="$(__fzf_rtfm_shell_unquote "$sub")"
   [[ -n "$sub" && "$lastw" == "$sub" && "$lastw" != -* ]] || return 1
   # BSD letters (ps a/x/u) are flags, not finished subcommands.
   [[ "$sub" == [A-Za-z] ]] && return 1
@@ -2190,8 +2200,16 @@ __fzf_rtfm_shell_quote_path() {
   setopt localoptions noshwordsplit
   local p="$1" q
   [[ -n "$p" ]] || return 0
-  # Flags stay literal. A real file whose name starts with "-" is still a path.
-  if [[ "$p" == -* && "$p" != */* && "$p" != ./* && "$p" != '~'* && ! -e "$p" ]]; then
+  # Commands, subcommands, and options stay literal so the next Tab can
+  # still open their man/--help page. Only filesystem paths are escaped.
+  if [[ "$p" != /* && "$p" != ./* && "$p" != ../* && "$p" != '~'* && "$p" != */* ]]; then
+    if [[ ! -e "$p" && ! -L "$p" ]]; then
+      print -r -- "$p"
+      return 0
+    fi
+  fi
+  # A flag that is not a real file (--color[=WHEN]) stays literal.
+  if [[ "$p" == -* && "$p" != */* && "$p" != ./* && "$p" != '~'* && ! -e "$p" && ! -L "$p" ]]; then
     print -r -- "$p"
     return 0
   fi
@@ -2272,16 +2290,34 @@ __fzf_apply_bsd_letter() {
   zle redisplay
 }
 
+# cd and pushd keep the slash open so the next Tab walks into the directory.
+# cp, mv, and other commands finish the argument (trailing space).
+__fzf_rtfm_dir_pick_stays_open() {
+  setopt localoptions noshwordsplit
+  local line="${prefix_rest:-$LBUFFER}"
+  local -a words
+  local scan idx cmd
+  [[ -n "$line" ]] || return 1
+  words=("${(@f)$( __fzf_rtfm_wsplit "$line" )}")
+  (( ${#words} )) || return 1
+  scan="$(__fzf_rtfm_scan_command_words "${words[@]}")" || true
+  [[ "$scan" == cmd\ * ]] || return 1
+  idx="${scan#cmd }"
+  cmd="$(__fzf_rtfm_shell_unquote "${words[idx]}")"
+  [[ "$cmd" == cd || "$cmd" == pushd ]]
+}
+
 __fzf_apply_dir_pick() {
-  local picked="$1"
+  local picked="$1" trail=""
   [[ -z "$picked" ]] && return 1
   picked="$(__fzf_rtfm_resolve_path_pick "$picked")"
   picked="${picked%/}/"
   picked="$(__fzf_rtfm_shell_quote_path "$picked")"
+  __fzf_rtfm_dir_pick_stays_open || trail=" "
   if [[ -z "$prefix_rest" ]]; then
-    LBUFFER="${picked}"
+    LBUFFER="${picked}${trail}"
   else
-    LBUFFER="${prefix_rest} ${picked}"
+    LBUFFER="${prefix_rest} ${picked}${trail}"
   fi
   zle redisplay
 }
@@ -2821,7 +2857,7 @@ __fzf_tab_try_path_firstword() {
   file_rows="$(__fzf_tab_immediate_file_rows "$dir" "$list_mode" 1 1)"
   [[ -n "$file_rows" ]] || { zle redisplay; return 0; }
   q="$base"
-  __fzf_rtfm_browse_apply "" "$file_rows" 'path> ' "$q" all || return
+  __fzf_rtfm_browse_apply "" "$file_rows" 'path> ' "$q" "$list_mode" || return
 }
 
 __fzf_pick_mixed() {
@@ -2904,8 +2940,15 @@ __fzf_pick_mixed() {
       __fzf_rtfm_sh_set preview_out "$preview_out"
       __fzf_rtfm_sh_set statefile "$state"
       print -r 'tok=$1'
+      print -r 'kind=$2'
       print -r 'dir=$(sed -n "1p" "$statefile" 2>/dev/null)'
       print -r '[ -n "$dir" ] || dir=.'
+      # Command, subcommand, and option rows: the description, even when a
+      # file in this directory has the same name.
+      print -r 'if [ "$kind" != f ]; then'
+      print -r '  awk -F "\t" -v t="$tok" '\''$1==t { print $3; exit }'\'' "$manfile" > "$preview_out" 2>/dev/null'
+      print -r '  exit 0'
+      print -r 'fi'
       print -r 'path=$tok'
       print -r 'if [ "$dir" != . ] && [ "$dir" != ./ ] && [ ! -e "$tok" ] && [ ! -L "$tok" ]; then'
       print -r '  case "$dir" in'
@@ -2926,13 +2969,13 @@ __fzf_pick_mixed() {
     preview_opts=(
       --preview="cat -- $(__fzf_rtfm_sh_sq "$preview_out")"
       --preview-window="$__fzf_rtfm_fzf_preview_window"
-      --bind "focus:execute-silent($(__fzf_rtfm_sh_sq "$focus_script") {1})+refresh-preview"
+      --bind "focus:execute-silent($(__fzf_rtfm_sh_sq "$focus_script") {1} {2})+refresh-preview"
     )
     # Enter via transform when man_rows present; otherwise --expect=enter.
     expect_opts=(--expect=tab,enter)
     bind_opts=(
       "${__fzf_rtfm_fzf_binds_preview_nav[@]}"
-      --bind "tab:transform:$(__fzf_rtfm_sh_sq "$transformer") {1}"
+      --bind "tab:transform:$(__fzf_rtfm_sh_sq "$transformer") {1} {2}"
       --bind "alt-.:transform:$(__fzf_rtfm_sh_sq "$toggler")"
     )
 
@@ -3221,9 +3264,6 @@ __fzf_rtfm_tab_continue_rebuild() {
       fi
     fi
   fi
-  if __fzf_rtfm_is_dir_prefix; then
-    list_mode=dirs
-  fi
   __fzf_tab_path_token_dir_base
   list_dir="$dir"
   if [[ "$list_mode" == dirs ]] || __fzf_rtfm_path_only || [[ -n "$man_rows" ]]; then
@@ -3260,9 +3300,6 @@ __fzf_rtfm_browse_apply() {
   list_dir="$dir"
   list_depth=1
   list_mode="$mode"
-  if __fzf_rtfm_is_dir_prefix; then
-    list_mode=dirs
-  fi
   # Any path token: never mix man options/arguments into the picker.
   if __fzf_rtfm_path_only; then
     use_man=0
@@ -3393,7 +3430,7 @@ __fzf_tab_try_rtfm() {
   local sub_complete=0
   if __fzf_rtfm_sub_token_complete "$cmd" "$sub" "$lastw" "${LBUFFER}${RBUFFER}"; then
     sub_complete=1
-  elif [[ -n "$sub" && "$lastw" == "$sub" && "$lastw" != -* ]]; then
+  elif [[ -n "$sub" && "$(__fzf_rtfm_shell_unquote "$lastw")" == "$sub" && "$lastw" != -* ]]; then
     sub=""
   fi
 
@@ -3409,9 +3446,8 @@ __fzf_tab_try_rtfm() {
   local man_rows=""
   local file_rows=""
 
-  local path_only=0 dir_only=0
+  local path_only=0
   __fzf_rtfm_path_only && path_only=1
-  __fzf_rtfm_is_dir_prefix && dir_only=1
 
   local cmdline="${LBUFFER}${RBUFFER}"
   if [[ "$cmd" == cd || "$cmd" == pushd ]]; then
@@ -3437,7 +3473,6 @@ __fzf_tab_try_rtfm() {
         local list_mode=all
         dir='.' base=''
         __fzf_tab_path_token_dir_base
-        (( dir_only )) && list_mode=dirs
         file_rows="$(__fzf_tab_immediate_file_rows "$dir" "$list_mode" 1 1)"
       fi
     fi
