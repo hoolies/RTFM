@@ -42,9 +42,10 @@
 #   looks like it takes a path. Token starting with "-" is options only.
 # - cd/pushd after a space: zsh -L/-P, then directories only (not Tcl man / man -k ^cd-). No .. entries.
 # - Cwd with no / or ~ in the token: every directory command starts in the
-#   current directory. Typed directory (src/, /, ~/…): that directory is the root.
-#   Tab on a non-empty directory locks it; fuzzy then runs inside that tree.
-#   cd/pushd list directories only. Other path commands list files too.
+#   current directory and fuzzy-matches up to __fzf_rtfm_tree_depth levels
+#   (dirs + files for path commands). Typed directory (src/, /, ~/…): that
+#   directory is the root at the same depth. Tab on a non-empty directory locks
+#   it. cd/pushd list directories only. Other path commands list files too.
 #   / stays one level. Insert still uses the full path.
 #   Enter on a directory for a path command inserts it with a trailing space (next argument).
 #   cd/pushd leave the slash open. Paths are inserted backslash-escaped (my\ dir/).
@@ -233,11 +234,12 @@ HOW TO USE
     when the command takes paths. A token starting with - is options only.
 
   Typed directory (src/, /)
-    A path with no / and no leading ~ starts in the current directory.
-    Tab on a subdirectory locks it, then fuzzy-matches inside that
-    directory and its subdirectories. cd and pushd list directories
-    only. Enter on a directory inserts it with a trailing space
-    so the next Tab is the next argument (cp src dst). cd and pushd leave the slash
+    A path with no / and no leading ~ starts in the current directory
+    and fuzzy-matches three levels deep (directories and files).
+    Typing src/ or Tab on a subdirectory locks that directory as the
+    root at the same depth. cd and pushd list directories only.
+    Enter on a directory inserts it with a trailing space so the next
+    Tab is the next argument (cp src dst). cd and pushd leave the slash
     open. Spaces in a path are inserted escaped (my\ dir/) so the shell
     sees one word.
 
@@ -250,10 +252,11 @@ KEYS INSIDE FZF
   arrows / Ctrl-j / Ctrl-k   Move selection
   Left/Right or Ctrl-h/l     Scroll the preview pane
   Tab                        Non-empty directory: lock it, then
-                             fuzzy-match inside it and its
-                             subdirectories. File, option, or empty
-                             directory: insert it and keep the picker
-                             open for the next token.
+                             fuzzy-match three levels deep inside it
+                             (files included for path commands).
+                             File, option, or empty directory: insert
+                             it and keep the picker open for the next
+                             token.
   Enter                      Insert the current pick and return to the shell
                              (does not run the command).
   Esc                        Abort and leave the command line unchanged.
@@ -2739,9 +2742,9 @@ __fzf_last_word_is_pathlike() {
   [[ "$w" == /* || "$w" == ./ || "$w" == ./* || "$w" == ../ || "$w" == ../* || "$w" == '~'* || "$w" == */* ]]
 }
 
-# How far a locked directory is walked. / stays one level.
+# How far directory fuzzy walks from the cwd or a locked directory. / stays one level.
 # cd/pushd list directories only; other path commands list files too.
-typeset -g __fzf_rtfm_tree_depth=8
+typeset -g __fzf_rtfm_tree_depth=3
 
 # True when the token names a path outright: /…, ~…, or anything with a slash.
 # A bare name (src) is not explicit, so cp starts in the current directory.
@@ -2759,6 +2762,17 @@ __fzf_rtfm_anchor_cwd_token() {
   __fzf_rtfm_path_is_explicit "${1-$lastw}" && return 1
   dir='.'
   base=''
+}
+
+# Depth for the current list root. Always the tree depth except at /.
+__fzf_rtfm_list_depth_for() {
+  setopt localoptions noshwordsplit
+  local d="${1-.}"
+  if [[ "$d" == / ]]; then
+    print -r -- 1
+  else
+    print -r -- "$__fzf_rtfm_tree_depth"
+  fi
 }
 
 # True when the current token is already a directory path (src/, /, ~/…).
@@ -3321,10 +3335,8 @@ __fzf_rtfm_tab_continue_rebuild() {
   __fzf_tab_path_token_dir_base
   __fzf_rtfm_anchor_cwd_token || true
   list_dir="$dir"
-  local _depth=1
-  if __fzf_rtfm_path_is_explicit; then
-    _depth="$__fzf_rtfm_tree_depth"
-  fi
+  local _depth
+  _depth="$(__fzf_rtfm_list_depth_for "$list_dir")"
   if [[ "$list_mode" == dirs ]] || __fzf_rtfm_path_only || [[ -n "$man_rows" ]]; then
     if __fzf_rtfm_path_only || [[ "$list_mode" == dirs ]]; then
       file_rows="$(__fzf_tab_immediate_file_rows "$list_dir" "$list_mode" "$_depth" 1)"
@@ -3343,8 +3355,9 @@ __fzf_rtfm_tab_continue_rebuild() {
 }
 
 # ZLE-only (do not call from $(...)). Path commands fuzzy-match the tree under
-# the current directory, or under a directory locked with Tab. cd/pushd stay
-# one level. Enter inserts and returns to the shell. Alt-. toggles hidden names.
+# the current directory, or under a directory locked with Tab, up to
+# __fzf_rtfm_tree_depth (files included except cd/pushd). Enter inserts and
+# returns to the shell. Alt-. toggles hidden names.
 __fzf_rtfm_browse_apply() {
   # xtrace prints assignments into the 90% gap above fzf on Tab-continue.
   __fzf_rtfm_untrace
@@ -3357,10 +3370,7 @@ __fzf_rtfm_browse_apply() {
   __fzf_tab_path_token_dir_base
   __fzf_rtfm_anchor_cwd_token || true
   list_dir="$dir"
-  list_depth=1
-  if __fzf_rtfm_path_is_explicit; then
-    list_depth="$__fzf_rtfm_tree_depth"
-  fi
+  list_depth="$(__fzf_rtfm_list_depth_for "$list_dir")"
   list_mode="$mode"
   # Any path token: never mix man options/arguments into the picker.
   if __fzf_rtfm_path_only; then
@@ -3435,7 +3445,6 @@ __fzf_rtfm_browse_apply() {
     fi
     __fzf_zle_token_state
     q=""
-    list_depth=1
     # Rebuild under silenced stderr. Fixed fd 8 (no locals before redirect)
     # so xtrace cannot paint a mktemp path onto the prompt above fzf.
     exec 8>&2
@@ -3462,6 +3471,7 @@ __fzf_rtfm_browse_apply() {
       command rm -rf -- "$_d"
       _d=
     fi
+    list_depth="$(__fzf_rtfm_list_depth_for "$list_dir")"
     [[ -n "$_d" ]] && command rm -rf -- "$_d"
     exec 2>&8
     exec 8>&-
@@ -3523,8 +3533,8 @@ __fzf_tab_try_rtfm() {
       dir='.' base=''
       __fzf_tab_path_token_dir_base
       __fzf_rtfm_anchor_cwd_token || true
-      local _cdepth=1
-      __fzf_rtfm_path_is_explicit && _cdepth="$__fzf_rtfm_tree_depth"
+      local _cdepth
+      _cdepth="$(__fzf_rtfm_list_depth_for "$dir")"
       file_rows="$(__fzf_tab_immediate_file_rows "$dir" dirs "$_cdepth" 1)"
     fi
   else
@@ -3536,11 +3546,11 @@ __fzf_tab_try_rtfm() {
     if [[ "$lastw" != -* ]]; then
       if (( path_only )) || __fzf_rtfm_cmd_wants_files "$cmd" "$sub" "$entries"; then
         local list_mode=all
-        local _depth=1
+        local _depth
         dir='.' base=''
         __fzf_tab_path_token_dir_base
         __fzf_rtfm_anchor_cwd_token || true
-        __fzf_rtfm_path_is_explicit && _depth="$__fzf_rtfm_tree_depth"
+        _depth="$(__fzf_rtfm_list_depth_for "$dir")"
         file_rows="$(__fzf_tab_immediate_file_rows "$dir" "$list_mode" "$_depth" 1)"
       fi
     fi

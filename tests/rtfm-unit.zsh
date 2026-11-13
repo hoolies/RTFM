@@ -1167,8 +1167,8 @@ assert_ok 'cp bare directory name starts at the cwd' \
   '[[ "$(command cat -- "$_tree/out/list_dir")" == . ]]'
 assert_ok 'cp bare name still lists a sibling file' \
   'command awk -F "\t" '\''$1=="note" && $2=="f" {found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
-assert_ok 'cp bare name lists the directory, not its contents' \
-  'command awk -F "\t" '\''$1=="src" {found=1} END{exit !found}'\'' "$_tree/out/file_rows" && ! command awk -F "\t" '\''$1=="src/nested/deep" {found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+assert_ok 'cp bare name fuzzy-matches nested files' \
+  'command awk -F "\t" '\''$1=="src/nested/deep" {found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
 command rm -rf "$_tree/out"
 mkdir -p "$_tree/out"
 LBUFFER='cp src/'
@@ -1191,6 +1191,8 @@ assert_ok 'cd bare directory name starts at the cwd' \
   '[[ "$(command cat -- "$_tree/out/list_dir")" == . ]]'
 assert_ok 'cd bare name lists directories only' \
   'command awk -F "\t" '\''$1=="src"{found=1} END{exit !found}'\'' "$_tree/out/file_rows" && ! command awk -F "\t" '\''$1=="note"{found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
+assert_ok 'cd bare name fuzzy-matches nested directories' \
+  'command awk -F "\t" '\''$1=="src/nested/inner"{found=1} END{exit !found}'\'' "$_tree/out/file_rows"'
 command rm -rf "$_tree/out"
 mkdir -p "$_tree/out"
 LBUFFER='cd src/'
