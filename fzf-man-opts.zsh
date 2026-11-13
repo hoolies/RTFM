@@ -2553,15 +2553,14 @@ __fzf_tab_path_token_dir_base() {
 
 __fzf_rtfm_text_wants_files() {
   # $1 when given; otherwise stdin. A positional word is not a path.
+  # DIRECTORY is checked before DIR so ln(1)/install(1) usage matches.
   local text="${1-}"
   if [[ $# -eq 0 ]]; then
     text="$(cat)"
   fi
   print -r -- "$text" | command awk '
     /<file>|<path>|<dir>|filename/ { hit = 1 }
-    /(^|[^A-Za-z0-9_])FILE([^A-Za-z0-9_]|$)/ { hit = 1 }
-    /(^|[^A-Za-z0-9_])PATH([^A-Za-z0-9_]|$)/ { hit = 1 }
-    /(^|[^A-Za-z0-9_])DIR([^A-Za-z0-9_]|$)/ { hit = 1 }
+    /(^|[^A-Za-z0-9_])(FILE|PATH|DIRECTORY|DIR)([^A-Za-z0-9_]|$)/ { hit = 1 }
     END { exit !hit }
   '
 }
@@ -2604,8 +2603,9 @@ __fzf_rtfm_cmd_wants_files() {
   [[ -n "$sub" ]] && topic="${cmd}-${sub}"
   case "$cmd" in
     ls|ll|la|cat|bat|less|more|head|tail|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|\
-    chgrp|file|stat|vim|nvim|nano|emacs|code|tar|unzip|gzip|gunzip|diff|patch|\
-    grep|rg|find|fd|hexdump|xxd|source|.)
+    chgrp|ln|readlink|realpath|file|stat|vim|nvim|nano|emacs|code|tar|unzip|\
+    gzip|gunzip|diff|patch|grep|rg|find|fd|hexdump|xxd|source|.|rsync|scp|sftp|\
+    install|tee|truncate|du|open|xdg-open|pv|split|cmp)
       return 0
       ;;
     docker)

@@ -761,6 +761,12 @@ assert_ok 'docker run takes files' '__fzf_rtfm_cmd_wants_files docker run'
 assert_ok 'docker ps does not take files' '! __fzf_rtfm_cmd_wants_files docker ps'
 assert_ok 'usage FILE wants files' \
   '__fzf_rtfm_text_wants_files "copy <file> <path> <dir> filename"'
+assert_ok 'DIRECTORY token wants files' \
+  '__fzf_rtfm_text_wants_files "ln [OPTION]... TARGET... DIRECTORY"'
+assert_ok 'ln is a hardcoded path command' \
+  '__fzf_rtfm_cmd_wants_files ln'
+assert_ok 'rsync is a hardcoded path command' \
+  '__fzf_rtfm_cmd_wants_files rsync'
 assert_ok 'plain prose does not want files' \
   '! __fzf_rtfm_text_wants_files "just a message"'
 assert_ok 'compact whitespace' '[[ "$(__fzf_compact_ws "  a   b  ")" == "a b" ]]'
